@@ -1,0 +1,2 @@
+# notion-api must be installed first — see README
+tomli>=2.0.0; python_version < "3.11"

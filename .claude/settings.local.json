@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p /home/vince/Documents/Notion_Resume)",
+      "Read(//home/vince/Documents/**)",
+      "Bash(ls /home/vince/Documents/Notion_Automator/requirements*.txt)"
+    ]
+  }
+}

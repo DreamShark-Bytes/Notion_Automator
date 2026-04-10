@@ -1,0 +1,17 @@
+[Unit]
+Description=Notion Automation Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/vince/notion_automator
+ExecStart=/home/vince/notion_automator/venv/bin/python daemon.py
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
