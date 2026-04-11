@@ -116,7 +116,7 @@ def auto_last_closed(client: "NotionClient", page: dict, prev_page: dict | None)
     logger.info(f"Compare groups: {current_group=} -> {prev_group=}, last_closed={last_closed!r}")
 
     # Transition: status just moved INTO Complete — stamp with current time
-    if current_group == DONE_GROUP and prev_group != DONE_GROUP:
+    if prev_page is not None and current_group == DONE_GROUP and prev_group != DONE_GROUP:
         logger.info("Status moved to Complete — stamping Last Closed")
         return {TARGET_FIELD: {"date": {"start": _now_iso()}}}
 
@@ -172,8 +172,9 @@ def auto_due_date_update_count(_client, page: dict, prev_page: dict | None) -> d
         updates[FIRST_DATE_FIELD] = {"date": {"start": current_due}}
         return updates
 
-    # Increment only when: page has due-date history, new value is a date, and it changed
-    if first_due and current_due and current_due != prev_due:
+    # Increment only when: page has due-date history, new value is a date, and it changed.
+    # Guard against prev_page=None (first poll after startup) — no baseline means no change.
+    if prev_page is not None and first_due and current_due and current_due != prev_due:
         logger.info(f"Due date changed {prev_due!r} → {current_due!r} — incrementing to {count + 1}")
         updates[COUNTER_FIELD] = {"number": count + 1}
 

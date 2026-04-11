@@ -1,16 +1,15 @@
-# Notion Automation Daemon (Raspberry Pi)
+# Notion Automation Daemon
 
-Replace Notion's paid automation features with a self-hosted polling daemon.
+Replace Notion's paid automation features with a self-hosted polling daemon. Runs on any Linux system with systemd (Raspberry Pi, Ubuntu, Debian, etc.).
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `notion_client.py` | Low-level Notion API wrapper |
-| `automations.py` | Your automation rules (edit this!) |
 | `daemon.py` | Polling loop / entry point |
-| `.env.example` | Config template |
+| `automations.py` | Your automation rules (edit this!) |
 | `notion-daemon.service` | systemd unit for auto-start on boot |
+| `config.toml.example` | Config template — copy to `config.toml` and fill in |
 
 ---
 
@@ -18,7 +17,7 @@ Replace Notion's paid automation features with a self-hosted polling daemon.
 
 1. Go to https://www.notion.so/my-integrations
 2. Click **+ New integration** → give it a name → Submit
-3. Copy the **Internal Integration Secret** (starts with `secret_`)
+3. Copy the **Internal Integration Secret**
 4. Open each Notion database you want to automate → `...` menu → **Add connections** → select your integration
 
 ---
@@ -33,23 +32,22 @@ The database ID is the UUID between your workspace name and `?v=`.
 
 ---
 
-## 3. Set Up on Raspberry Pi
+## 3. Install
 
 ```bash
-# Clone / copy files to your Pi
-mkdir ~/notion_automator && cd ~/notion_automator
-# (copy all .py files here)
+git clone https://github.com/DreamShark-Bytes/Notion_Automator
+cd Notion_Automator
 
-# Create a virtual environment
+# Install Notion_API (shared dependency — must be done first)
+pip install git+https://github.com/DreamShark-Bytes/Notion_API.git
+
+# Create virtual environment and install remaining dependencies
 python3 -m venv venv
-source venv/bin/activate
-
-# Install dependencies
-pip install requests python-dotenv
+venv/bin/pip install -r requirements.txt
 
 # Configure
-cp .env.example .env
-nano .env   # fill in your NOTION_TOKEN and DATABASE_IDS
+cp config.toml.example config.toml
+nano config.toml   # fill in your token and database IDs
 ```
 
 ---
@@ -57,8 +55,7 @@ nano .env   # fill in your NOTION_TOKEN and DATABASE_IDS
 ## 4. Test It
 
 ```bash
-source venv/bin/activate
-python daemon.py
+venv/bin/python daemon.py
 ```
 
 You should see polling logs every 60 seconds. Make a change in Notion and watch it react.
@@ -67,14 +64,19 @@ You should see polling logs every 60 seconds. Make a change in Notion and watch 
 
 ## 5. Run as a System Service (auto-start on boot)
 
+Edit the service file **before** copying it — replace both placeholder values:
+
+| Placeholder | Replace with |
+|---|---|
+| `YOUR_USER` | your Linux username (e.g. `vince`) |
+| `/path/to/Notion_Automator` | absolute path to this repo (e.g. `/home/vince/Documents/Notion_Automator`) |
+
 ```bash
-# Copy the service file
+# Edit placeholders
+nano notion-daemon.service
+
+# Copy to systemd and enable
 sudo cp notion-daemon.service /etc/systemd/system/
-
-# Edit the paths if your username isn't 'pi'
-sudo nano /etc/systemd/system/notion-daemon.service
-
-# Enable and start
 sudo systemctl daemon-reload
 sudo systemctl enable notion-daemon
 sudo systemctl start notion-daemon
@@ -100,40 +102,16 @@ def my_automation(client, page, prev_page) -> dict:
 
 Then add it to the `AUTOMATIONS` list at the bottom of the file.
 
-### Available helpers in automations.py
-
-| Helper | Returns |
-|---|---|
-| `_get_select(page, "Field")` | string or None |
-| `_get_date(page, "Field")` | ISO date string or None |
-| `_get_number(page, "Field")` | float or None |
-| `_now_iso()` | current UTC ISO timestamp |
-
-### Property update formats
-
-```python
-# Date
-{"Due Date": {"date": {"start": "2025-01-01"}}}
-
-# Number
-{"Count": {"number": 5}}
-
-# Rich text
-{"Notes": {"rich_text": [{"type": "text", "text": {"content": "hello"}}]}}
-
-# Checkbox
-{"Done": {"checkbox": True}}
-
-# Select
-{"Status": {"select": {"name": "In Progress"}}}
-```
+See `DESIGN.md` for the full automation signature, governance system, and architecture details.
 
 ---
 
 ## Tuning Poll Interval
 
+Set `poll_interval` in `config.toml`.
+
 - **60s** (default) — good balance, ~1440 API calls/day per database
-- **30s** — more responsive, 2880 calls/day
+- **30s** — more responsive, ~2880 calls/day
 - Notion's free tier rate limit is 3 requests/second — you won't come close.
 
 ---
@@ -146,4 +124,4 @@ Then add it to the `AUTOMATIONS` list at the bottom of the file.
 | Update fields | ✅ | ✅ |
 | Send Slack/email | ✅ (add your own code) | ✅ |
 | Webhook / instant | ❌ (polling only) | ✅ |
-| Always-on device needed | ✅ (your Pi) | ❌ |
+| Always-on device needed | ✅ | ❌ |

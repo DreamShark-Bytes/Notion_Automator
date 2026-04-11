@@ -5,9 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=/home/vince/notion_automator
-ExecStart=/home/vince/notion_automator/venv/bin/python daemon.py
+User=YOUR_USER
+WorkingDirectory=/path/to/Notion_Automator
+ExecStart=/path/to/Notion_Automator/venv/bin/python daemon.py
 Restart=on-failure
 RestartSec=30
 StandardOutput=journal
