@@ -8,6 +8,7 @@ Replace Notion's paid automation features with a self-hosted polling daemon. Run
 |---|---|
 | `daemon.py` | Polling loop / entry point |
 | `automations.py` | Your automation rules (edit this!) |
+| `recurring_tasks.py` | Recurring task automation logic and shared helpers |
 | `notion-daemon.service` | systemd unit for auto-start on boot |
 | `config.toml.example` | Config template — copy to `config.toml` and fill in |
 
@@ -88,9 +89,64 @@ journalctl -u notion-daemon -f
 
 ---
 
-## 6. Adding Your Own Automations
+## 6. Recurring Tasks
 
-Open `automations.py`. Each automation is a plain function:
+Automatically creates a new task whenever a recurring task is completed or cancelled, keeping one open task per series at all times.
+
+### 6.1 Create the Definitions Database in Notion
+
+Create a new database in Notion with these fields:
+
+| Field | Type | Notes |
+|---|---|---|
+| Name | Title | |
+| Type | Select | `Habit`, `Responsibility` |
+| Active | Checkbox | Uncheck to pause a series without deleting it |
+| Cadence Type | Select | `Once per period`, `N per period`, `Minimum N per period`, `Unlimited` |
+| Cadence N | Number | Used by `N per period` and `Minimum N per period`; blank for others |
+| Period | Select | `Day`, `Week`, `Month`, `Year` |
+| Anchor Day | Number | Mon=1 … Sun=7 for weekly; 1–31 for monthly (overflows to last day of month) |
+| Anchor Time | Text | e.g. `13:00`; blank = no specific time |
+| Grace Period (days) | Number | Responsibilities only — auto-cancelled this many days past due; blank = never |
+| Notes | Rich Text | |
+| Last Completed | Rollup | Max of `Last Closed` from related tasks |
+
+Then add these fields to your **main tasks database**:
+
+| Field | Type | Notes |
+|---|---|---|
+| Recurring Series | Relation | Points to the Definitions database |
+| Instance # | Number | Filled in by the bot at task creation |
+| Period Key | Text | Internal — used by the bot to track period boundaries |
+| Period Target | Text | e.g. `Minimum 3 per Week` — set by the bot at creation |
+
+Connect your integration to both databases (`...` menu → **Add connections**).
+
+### 6.2 Configure
+
+In `config.toml`, add:
+
+```toml
+[recurring_tasks]
+enabled = true
+definitions_db_id = "your-definitions-database-id"
+tasks_db_id = "your-main-tasks-database-id"
+```
+
+### 6.3 How it works
+
+- **One open task per series at all times.** When a task is marked Done or Cancelled, the bot creates the next one automatically.
+- **Due dates** are calculated from Anchor Day and Anchor Time. Without an anchor, the full period span is used (e.g. April 1 → April 30 for a monthly task).
+- **Instance #** counts occurrences. Resets to 1 at the start of each new period for `Once per period` and `N per period`; continues incrementing for `Minimum N per period` and `Unlimited` until the period rolls over.
+- **Grace period** (Responsibilities only): if a task is still open more than N days past its due date, the bot cancels it and creates the next one.
+- **Startup governance**: on every daemon start, the bot checks that each active definition has exactly one open task. Zero → creates one. Multiple → logs a warning for manual resolution.
+- **Deleted tasks** are handled by governance — if a recurring task is deleted, the startup check will detect the missing open task and create a replacement.
+
+---
+
+## 7. Adding Your Own Automations
+
+Open `automations.py`. Each automation is a plain function (shared helpers are in `recurring_tasks.py`):
 
 ```python
 def my_automation(client, page, prev_page) -> dict:
@@ -122,6 +178,15 @@ Set `poll_interval` in `config.toml`.
 |---|---|---|
 | Trigger on change | ✅ (within poll interval) | ✅ (instant) |
 | Update fields | ✅ | ✅ |
+| Recurring tasks | ✅ | ✅ |
 | Send Slack/email | ✅ (add your own code) | ✅ |
 | Webhook / instant | ❌ (polling only) | ✅ |
 | Always-on device needed | ✅ | ❌ |
+
+---
+
+## Future Plans
+
+See `DESIGN.md` for full details on planned features.
+
+- **Project Page** — A single Notion page per project serving as its home base. The daemon will auto-detect first-run and create any required databases (e.g. the Recurring Task Definitions database) as children of the Project Page. Users can move them anywhere afterwards — page IDs are permanent. The Project Page will also surface status/health information and Notion-based configuration for settings that change frequently.

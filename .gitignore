@@ -4,6 +4,8 @@ config.toml
 
 # Claude Code
 .claude/
+CLAUDE.md
+*Session-History.md
 
 # Python
 __pycache__/

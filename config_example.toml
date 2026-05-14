@@ -1,0 +1,20 @@
+# Notion Automator Configuration
+# Run: python daemon.py
+
+# Your Notion integration token (Settings → Integrations → New integration)
+token = "ntn_your_token_here"
+
+# Notion database IDs to watch (one per line)
+database_ids = [
+  "your-database-id-here",
+]
+
+# Seconds between polls
+poll_interval = 60
+
+# ── Recurring Tasks (optional) ────────────────────────────────────────────────
+# Remove or comment out this section to disable recurring task automation.
+[recurring_tasks]
+enabled = true
+definitions_db_id = "your-recurring-definitions-database-id-here"
+tasks_db_id = "your-main-tasks-database-id-here"
