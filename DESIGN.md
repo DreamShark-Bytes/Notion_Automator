@@ -825,3 +825,19 @@ Numbering matches the user's design notes. Resolved items are in the Decision Lo
 | ID | Question | Depends on |
 |---|---|---|
 *(All discovered questions resolved — see Decision Log.)*
+
+---
+
+## 12. Ideas Parking Lot
+
+Rough ideas that are not yet designed or committed to. Nothing here is planned — it's a holding area so ideas aren't lost.
+
+---
+
+### Timer / Mission Tracking
+
+**One-liner:** Tie closed tasks to "mission" areas and surface how much effort went into each one over time.
+
+**Context:** The user maintains a set of high-level missions/workbench areas in Notion (e.g. ADHD Medication, Art Chatbot Coding Project, Improv Comedy Journey, Game Dev Journaling, Job Search). These live outside the main task list and contain their own notes and details. The idea is to aggregate closed tasks during a period and attribute them to a mission — even loosely, not necessarily via a strict task-to-mission relation. Goals: track effort per mission, surface which tasks contributed, optionally estimate how long things took. Intentionally abstract and lightweight — not a time-tracking tool, more of an effort heatmap.
+
+**Open questions:** How are tasks attributed to a mission (explicit relation, tag, keyword match)? What does a "timer" look like in Notion — a duration field, a count, a rollup? How does effort estimation work without logged time? Is this read-only reporting or does the bot write anything back?

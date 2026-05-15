@@ -58,7 +58,7 @@ for the 2am cron or restarting the daemon to trigger the governance pass).
 **Setup:** RTD with Cadence Type = "Once per period", Period = "Month". One open task exists for NEXT month (user pre-created it). Close the current-month task.  
 **Action:** Set current-month task Status → Done.  
 **Expected:** No new task created — the next-month task already exists. Log shows "open task already exists for period …". Instance # on the next-month task is unchanged.  
-**Status:** `[ ]`
+**Status:** `[P]`
 
 ---
 
@@ -105,7 +105,7 @@ for the 2am cron or restarting the daemon to trigger the governance pass).
 ### B4 — User pre-fills Closed Date on a recurring task before closing
 **Setup:** Recurring task. User manually sets Closed Date to last month's date, then sets Status → Done. 
 **Expected:** Closed Date is NOT overwritten (pre-filled respected). New task Due Date targets NEXT period relative to last month's date (i.e., this month's due date, not next month).  
-**Status:** `[P]`
+**Status:** `[ ]`
 **Testing Notes:** Changing the Close date, letting the polling take place, and then closing a task DOES change the Closed Date AND edits the Reopen Count. Recurring tasks should NOT be touching the Closed Date, that should be exclusive to automations.py script, function: auto_closed_date() We should include that functionality as a requirement for recurring_tasks.py though. We had fixed the issue when a user had updated the Close Date and closed w/in the same polling period, but the issue occurs when changing Close Date, letting polling happen and then closing the task. (again this is regardless if the task is a Recurring Task or not.)  
 **Fix implemented (2026-04-22):** `auto_closed_date` now respects any pre-set Closed Date for all task types regardless of when it was set — the same-poll-only restriction was removed. Re-test needed.
 **Testing Notes 2:** This situation can only occur during polling as the field is cleared out from an Open task.  
@@ -174,10 +174,11 @@ for the 2am cron or restarting the daemon to trigger the governance pass).
 **Setup:** RTD with Type = "Responsibility", Grace Period = 2. Open task with Due Date = 3 days ago. No Ignore Grace Period checkbox.  
 **Action:** Wait for 2am GOVERNANCE cron (or restart daemon).  
 **Expected:** Task Status set to "Cancelled". GOVERNANCE then creates a new task since zero open remain.  
-**Status:** `[F]`
+**Status:** `[P]`
 **Testing Notes:** Ran Governance on 5/01/2026, with no Anchor Day/Time and when the next task was created (Min N per period, N=100) and it set the Due Date to NEXT month (june 1 to 30).  
 **Fix implemented (2026-04-22):** `use_next_period = False` when governance creates a task because none exists — new task now targets the current period (Z5). Grace period with None value now treated as 0 (Z8). Auto-cancelled tasks get a past-period Closed Date (Z9). Re-test needed.  
 **Fix updated (2026-05-12, second pass):** Auto-cancel Closed Date now set to end-of-due-period via `_period_end()` (e.g. April 30 23:59 for an April Monthly task) — correctly attributes the cancellation to the past period regardless of when governance runs. See Z9.
+**Testing Notes:** tested and passed
 
 ---
 
@@ -205,6 +206,7 @@ for the 2am cron or restarting the daemon to trigger the governance pass).
 **Testing Notes:** Manually created a task for a recurring task and it had to set the Instance # and Period Key.... despite the overdue nature of the task, it set the Period Key to "this week" and that caused the Responsibility to not auto-close. This is an outlier.  
 **Fix implemented (2026-04-22):** The init block in `auto_recurring_tasks` now derives Period Key from the task's existing Due Date (if set) rather than always using `now`. A manually created task with a past Due Date will now get the correct past period key, allowing the grace period stale-key check to fire. Re-test needed.  
 **Fix updated (2026-05-12):** Stale detection changed from `task_pk != current_period_key` to `task_pk < current_period_key` (lexicographic). Tasks with a FUTURE period key (pre-created for next period) are no longer considered stale and will not be auto-cancelled.
+**Testing Notes:** tested and passed
 
 ---
 
@@ -365,7 +367,7 @@ for the 2am cron or restarting the daemon to trigger the governance pass).
 **Setup:** Task is already in Complete group but Closed Date is empty (e.g., was closed before the bot was set up).  
 **Action:** Daemon startup governance pass (prev_page == page, no status transition fires, but governance check fires).  
 **Expected:** Closed Date backfilled from `last_edited_time`. Reopen Count initialized to 0 if missing.  
-**Status:** `[F]`
+**Status:** `[ ]`
 **Testing Notes:** When the daemon is running and copies the Last Edited time (yes), and it's setting the timezone of Last Closed to be UTC. I don't know why. I think that is the default for Last Edited since I don't think that is returning a timezone. I'm unsure.  
 **Fix implemented (2026-05-12):** Same root cause as B1 — `last_edited_time` from Notion is always UTC. The backfill now parses it through `_parse_closed_dt()` (which converts UTC→local via `.astimezone()`) and stores only the local YYYY-MM-DD date string. Re-test needed.
 
@@ -418,7 +420,7 @@ for the 2am cron or restarting the daemon to trigger the governance pass).
 **Setup:** Existing task with Due Date and First Due Date have the same date, but the time is different
 **Action:** Daemon polls and sees Due Date is the same as First Due Date, though the time has changed. 
 **Expected:** Count not incremented. 
-**Status:** `[F]`  
+**Status:** `[ ]`  
 **Fix implemented (2026-04-22):** `auto_due_date_update_count` now compares only the `[:10]` date portion of both current and previous Due Date strings. Time-only changes no longer increment the counter. Re-test needed.
 
 ---
@@ -427,7 +429,7 @@ for the 2am cron or restarting the daemon to trigger the governance pass).
 **Setup:** Existing task with Due Date and First Due Date have different dates
 **Action:** Daemon polls and sees Due Date changed the time but not the date. 
 **Expected:** Count not incremented. 
-**Status:** `[F]`  
+**Status:** `[ ]`  
 **Fix implemented (2026-04-22):** Same fix as H6 — date-only comparison. Re-test needed.
 
 ---
@@ -483,7 +485,12 @@ for the 2am cron or restarting the daemon to trigger the governance pass).
 
 ## J — Tests found by the developer that were not created by Claude
 
-*(No entries yet — add test cases here as they are discovered during testing.)*
+### J1 — Responsibility with Exactly N per period: N completions in current period → next task targets NEXT period
+**Setup:** RTD with Type = "Responsibility", Cadence Type = "Exactly N per period", N = 2. Two tasks for the current period have been completed (not cancelled).
+**Action:** GOVERNANCE pass.
+**Expected:** Governance detects 0 open tasks, counts 2 completions in current period (≥ N=2), sets `force_next=True`, and calls `_create_next_task` targeting the NEXT period.
+**Status:** `[ ]`
+**Fix implemented (2026-05-14):** `force_next` governance block expanded from Responsibility-only to all task types. Counts only completions via `_task_in_period` (which excludes `NON_COMPLETION_STATUSES`). Cancelled/skipped tasks do NOT consume the period quota — they are retried in the same period. `force_next_period=True` is passed to `_create_next_task` only when completion count ≥ N threshold.
 
 ---
 
@@ -527,6 +534,7 @@ Autoclose needs to set the Closed Date to the previous period so it doesn't coun
 **Fix implemented (2026-04-22):** Auto-cancel sets a past-period Closed Date in the same API call that sets Status = Cancelled.  
 **Fix updated (2026-05-12):** Closed Date changed from the task's Due Date (inaccurate — could be weeks old) to 23:59 yesterday local time.
 **Fix updated (2026-05-12, second pass):** "Yesterday at 23:59" was still wrong for week/month/year tasks — May 1 23:59 is still May, so an April Monthly task would count as May. Changed to end-of-due-period: `_period_end(period, due)` computes 23:59 on the last day of the period the Due Date falls in (e.g. April 30 23:59 for a Monthly task due in April, Sunday 23:59 for a Weekly task). This correctly attributes the cancellation to the past period regardless of when governance runs.
+**Fix updated (2026-05-14):** `_period_end` could return a future date if governance cancels a task whose period hasn't ended yet (e.g. a May task auto-cancelled on May 14 — period end is May 31). Fixed by capping at `min(_period_end(period, due), yesterday 23:59)`. The Closed Date is now always in the past.
 
 ### Z10 — Don't copy task title when creating new recurring task
 Need to automatically exclude copying the Title of the Recurring task that was closed. The default should be the title of the Recurring Task DEFINITION.  
