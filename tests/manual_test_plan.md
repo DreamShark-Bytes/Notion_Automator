@@ -103,8 +103,15 @@ for the 2am cron or restarting the daemon to trigger the governance pass).
 ---
 
 ### B4 — User pre-fills Closed Date on a recurring task before closing
-**Setup:** Recurring task. User manually sets Closed Date to last month's date, then sets Status → Done. 
-**Expected:** Closed Date is NOT overwritten (pre-filled respected). New task Due Date targets NEXT period relative to last month's date (i.e., this month's due date, not next month).  
+**Setup:** Recurring task. User manually sets Closed Date to a date outside the current period (e.g. last month or a far-future year), then sets Status → Done.  
+**Expected:**  
+(1) Closed Date is NOT overwritten — the pre-filled date is preserved by `auto_closed_date`.  
+(2) `_create_next_task` fetches all tasks for the RTD from the API, then upserts the just-closed task (with its pre-filled Closed Date) so `fetched_tasks` fully reflects its final state.  
+(3) `_task_in_period` uses the Closed Date to attribute the closed task to its actual period. A date from last month or 2078 is NOT attributed to the current period.  
+(4) The new task's target period is determined solely by counting completions in the CURRENT period from `fetched_tasks` — NOT from the pre-filled date directly.  
+— If the pre-filled date is outside the current period: the closed task is not counted toward the current period. If no other completions exist this period, new task targets the CURRENT period.  
+— If the pre-filled date is in the current period: the closed task counts toward the threshold normally (same behavior as no pre-fill).  
+The pre-filled date has no direct influence on where the new task goes; it only affects which period the closed task is attributed to.  
 **Status:** `[ ]`
 **Testing Notes:** Changing the Close date, letting the polling take place, and then closing a task DOES change the Closed Date AND edits the Reopen Count. Recurring tasks should NOT be touching the Closed Date, that should be exclusive to automations.py script, function: auto_closed_date() We should include that functionality as a requirement for recurring_tasks.py though. We had fixed the issue when a user had updated the Close Date and closed w/in the same polling period, but the issue occurs when changing Close Date, letting polling happen and then closing the task. (again this is regardless if the task is a Recurring Task or not.)  
 **Fix implemented (2026-04-22):** `auto_closed_date` now respects any pre-set Closed Date for all task types regardless of when it was set — the same-poll-only restriction was removed. Re-test needed.
@@ -555,3 +562,18 @@ It should not be checking the name but whether there are multiple open tasks wit
 ### Z14 — Do not increment Due Date Update Count when only changing time
 If the First Due Date and Due Date match for Date, do not change the update count. If the dates of Due Date do NOT match First Due Date but the TIME on Due Date changed and the date stayed the same, still do not increment.  
 **Fix implemented (2026-04-22):** Both current and previous Due Date are now compared using only the `[:10]` date portion. Time-only changes no longer increment the counter. Documented in DESIGN.md.
+
+### Z15 — Period Target sync writes empty string every poll for unrecognized cadence types
+When a task's RTD has a Cadence Type that `_build_period_target` doesn't recognize, it returns `""`. The Period Target sync condition `if expected_target != current_target` fires every poll (`"" != None`), writing an empty `rich_text` value to the task on every cycle.  
+**Fix implemented (2026-05-15):** Added `if expected_target` guard before the sync condition. Unrecognized cadence types leave the field as-is rather than overwriting with empty string.
+
+### Z16 — Bot-created/bot-edited tasks: snapshot doesn't reflect bot's writes → stale `prev_page` on next poll
+Two related problems sharing the same root cause and fix:  
+(A) **Bot-created tasks**: when `auto_recurring_tasks` creates a new task via `_create_next_task`, the daemon's snapshot doesn't know about it. If the user closes it before the next poll, the daemon sees it for the first time already in Complete state (`prev_page is None`). The `if prev_page is not None` guard blocks the completion trigger.  
+(B) **Bot-edited tasks**: after `update_page_properties`, the snapshot still holds the pre-poll page state. Next poll, the bot's own writes appear as "user changes" in the diff, and automations may react unnecessarily.  
+**Fix implemented (2026-05-15):**  
+— `_create_next_task` returns the created page dict. `auto_recurring_tasks` passes it back via `BOT_CREATED_PAGES_KEY` sentinel in its return dict. `run_automations_on_page` strips the sentinel, collects created pages, and returns `(post_edit_page, created_pages)`.  
+— `update_page_properties` (Notion API) returns the updated page. `run_automations_on_page` captures it as `post_edit_page`.  
+— `poll_database` and `run_automations_init_pass` use `post_edit_page` as the snapshot entry (falling back to the original page if no writes were made), and insert `created_pages` into the snapshot separately.  
+— Result: `prev_page` on the next poll reflects exactly what the bot left — only genuine user changes after the bot's writes appear as diffs.  
+**Known caveat (for DESIGN.md):** If a user changes field X and the bot also changes field X in the same poll interval, and the user's change landed *before* the bot's write, that user change is silently overwritten — the bot wins, and the snapshot holds the bot's value. If the user's change landed *after* the bot's write, the Notion API returns the user's value in the `update_page_properties` response and the snapshot captures it correctly. This is acceptable behavior: the bot manages specific fields and its writes are authoritative. Users who want to override a bot-managed field should do so after the bot has had a chance to act.

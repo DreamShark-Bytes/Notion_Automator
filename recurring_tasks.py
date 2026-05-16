@@ -32,6 +32,11 @@ logger = logging.getLogger(__name__)
 _definitions_db_id: str | None = None
 _tasks_db_id: str | None = None
 
+# Sentinel key used by auto_recurring_tasks to return newly created pages
+# back through the automation protocol so daemon.py can add them to the snapshot.
+# run_automations_on_page strips this key before calling update_page_properties.
+BOT_CREATED_PAGES_KEY = "__bot_created_pages__"
+
 
 def init(definitions_db_id: str, tasks_db_id: str) -> None:
     """Call once at daemon startup to enable recurring task automation."""
@@ -534,40 +539,8 @@ def _create_next_task(
     now = datetime.now().astimezone()
     current_period_key = _period_key(period, now) if period else None
 
-    # Determine whether we're in a new period relative to the closed task.
-    # Closed Date is the ground truth, but it may not be stamped yet when this runs
-    # (auto_closed_date collects the write in the same poll cycle, before it's committed).
-    # Fallback: use the task's Period Key field. If both are unavailable, assume new period.
-    if closed_task is None:
-        # Governance is creating a task because none exists.
-        # Normally targets the current period, but caller can force next period
-        # (e.g. when the current period's allotment is already consumed by cancelled tasks).
-        use_next_period = force_next_period
-    else:
-        closed_period_key = None
-        closed_date_str = _get_date(closed_task, "Closed Date")
-        if closed_date_str and period:
-            dt = _parse_closed_dt(closed_date_str)
-            if dt:
-                closed_period_key = _period_key(period, dt)
-        if closed_period_key is None and period:
-            closed_period_key = _get_text(closed_task, "Period Key (Recurring Task)")
-        new_period = (current_period_key != closed_period_key) if (current_period_key and closed_period_key) else True
-
-        if cadence_type in ("Once per period", "At most N per period") or new_period:
-            use_next_period = True
-        else:
-            use_next_period = False
-
-    # Compute the Period Key of the period we're targeting for the new task.
-    if period:
-        target_date, _ = _period_dates(period, anchor_day, use_next_period, now)
-        target_period_key = _period_key(period, target_date)
-    else:
-        target_period_key = current_period_key
-
-    # Fetch all tasks for this definition: used for the duplicate guard and Instance # count.
-    # A single query here avoids two round-trips.
+    # Fetch all tasks for this definition first — used for use_next_period determination,
+    # the duplicate guard, and Instance # count.
     fetched_tasks: list[dict] = []
     if _tasks_db_id:
         try:
@@ -577,6 +550,45 @@ def _create_next_task(
             )
         except Exception as e:
             logger.warning(f"Could not fetch tasks for {definition_id} before creation: {e}")
+
+    # Upsert closed_task into fetched_tasks so it reflects its current (just-closed) state.
+    # The API query above may have captured it before the status change propagated.
+    if closed_task is not None:
+        fetched_tasks = [t for t in fetched_tasks if t["id"] != closed_task["id"]]
+        fetched_tasks.append(closed_task)
+
+    # Determine whether the new task targets the current period or the next one.
+    if closed_task is None:
+        # Governance path: caller already computed force_next_period from all_tasks.
+        use_next_period = force_next_period
+    else:
+        # Completion trigger path: count completions in the current period from fetched_tasks
+        # (which now includes the just-closed task in its final state). The pre-filled
+        # Closed Date on closed_task correctly places it in its actual period via
+        # _task_in_period — so a 1991 or 2078 date won't incorrectly affect this period's count.
+        if cadence_type == "Once per period":
+            n_threshold = 1
+        elif cadence_n is not None and cadence_type in (
+            "Exactly N per period", "At most N per period", "Minimum N per period"
+        ):
+            n_threshold = int(cadence_n)
+        else:
+            n_threshold = None  # Unlimited — always stay in current period
+        if n_threshold is not None:
+            current_completions = sum(
+                1 for t in fetched_tasks
+                if _task_in_period(t, period, current_period_key)
+            )
+            use_next_period = current_completions >= n_threshold
+        else:
+            use_next_period = False
+
+    # Compute the Period Key of the period we're targeting for the new task.
+    if period:
+        target_date, _ = _period_dates(period, anchor_day, use_next_period, now)
+        target_period_key = _period_key(period, target_date)
+    else:
+        target_period_key = current_period_key
 
     # Guard: skip creation if an open task already exists for the target period.
     # Uses _get_status_group (not _is_open) so that a just-completed task whose
@@ -634,10 +646,12 @@ def _create_next_task(
         return
 
     try:
-        client.create_page(db_id, props)
+        new_page = client.create_page(db_id, props)
         logger.info(f"Created recurring task for definition {definition_id}, instance #{new_instance}.")
+        return new_page
     except Exception as e:
         logger.error(f"Failed to create recurring task for definition {definition_id}: {e}")
+        return None
 
 
 # ------------------------------------------------------------------ #
@@ -916,8 +930,9 @@ def auto_recurring_tasks(client: "NotionClient", page: dict, prev_page: dict | N
             logger.info(f"Recurring task {page['id']} was skipped/cancelled — skipping new task creation.")
             return {}
         logger.info(f"Recurring task {page['id']} completed — creating next task.")
-        _create_next_task(client, page, definition)
-        return {}
+        new_page = _create_next_task(client, page, definition)
+        created = [new_page] if new_page is not None else []
+        return {BOT_CREATED_PAGES_KEY: created}
 
     # Initialization: task is linked to a series but has never been initialized by the bot
     # (Period Key and Instance # are both unset — happens when a task is manually created
@@ -973,7 +988,7 @@ def auto_recurring_tasks(client: "NotionClient", page: dict, prev_page: dict | N
         cadence_n = _get_number(definition, "Cadence N")
         expected_target = _build_period_target(cadence_type, cadence_n, period)
         current_target = _get_text(page, "Period Target (Recurring Task)")
-        if expected_target != current_target:
+        if expected_target and expected_target != current_target:
             logger.info(f"Syncing Period Target on {page['id']}: {current_target!r} → {expected_target!r}")
             return {"Period Target (Recurring Task)": {"rich_text": [{"type": "text", "text": {"content": expected_target}}]}}
 

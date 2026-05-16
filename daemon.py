@@ -25,6 +25,7 @@ from notion_api import NotionClient
 from automations import AUTOMATIONS, GOVERNANCE
 from bot_notes import clear_bot_notes, flush_bot_notes
 import recurring_tasks
+from recurring_tasks import BOT_CREATED_PAGES_KEY
 
 parser = argparse.ArgumentParser(description="Notion automation daemon")
 parser.add_argument(
@@ -121,39 +122,58 @@ def run_automations_init_pass(client: NotionClient, database_id: str) -> dict[st
 
     snapshot: dict[str, dict] = {}
     for page in pages:
-        run_automations_on_page(client, page, page)
-        stripped = _strip_files(page)
-        snapshot[stripped["id"]] = stripped
+        post_edit_page, created = run_automations_on_page(client, page, page)
+        final = post_edit_page if post_edit_page is not None else page
+        snapshot[final["id"]] = _strip_files(final)
+        for new_page in created:  # will be empty during init pass, but handled for safety
+            snapshot[new_page["id"]] = _strip_files(new_page)
 
     logger.info(f"  → Automations init pass complete ({len(pages)} page(s)).")
     return snapshot
 
 
-def run_automations_on_page(client: NotionClient, page: dict, prev_page: dict | None):
+def run_automations_on_page(
+    client: NotionClient, page: dict, prev_page: dict | None
+) -> tuple[dict | None, list[dict]]:
     """Run all registered automations for a single page and apply updates.
 
     prev_page=None means the page is being seen for the first time mid-run.
     Automations still fire so data governance (initializing missing fields,
     stamping closed dates, etc.) takes effect immediately on new pages.
+
+    Returns (post_edit_page, created_pages):
+      - post_edit_page: the page as returned by the Notion API after bot writes,
+        or None if no writes were made. Use this as the snapshot entry so the
+        next poll's prev_page reflects the bot's changes rather than the pre-poll
+        state. Only genuine user changes after the bot's writes will appear as diffs.
+      - created_pages: pages created by automations (e.g. auto_recurring_tasks).
+        Insert these into the snapshot so the next poll has a valid prev_page for them.
     """
     if prev_page is None:
         logger.info(f"First time seeing page {page['id']} — running automations for initial governance")
 
     updates = {}
+    created_pages: list[dict] = []
 
     for fn in AUTOMATIONS:
         try:
             result = fn(client, page, prev_page)
+            # Strip the bot-created-pages sentinel key before building field updates.
+            new_pages = result.pop(BOT_CREATED_PAGES_KEY, [])
+            created_pages.extend(new_pages)
             updates.update(result)
         except Exception as e:
             logger.error(f"Automation '{fn.__name__}' failed on page {page['id']}: {e}")
 
+    post_edit_page: dict | None = None
     if updates:
         logger.info(f"Updating page {page['id']} with: {list(updates.keys())}")
         try:
-            client.update_page_properties(page["id"], updates)
+            post_edit_page = client.update_page_properties(page["id"], updates)
         except Exception as e:
             logger.error(f"Failed to update page {page['id']}: {e}")
+
+    return post_edit_page, created_pages
 
 
 def poll_database(client: NotionClient, database_id: str, snapshot: dict[str, dict], since: str) -> dict[str, dict]:
@@ -190,8 +210,15 @@ def poll_database(client: NotionClient, database_id: str, snapshot: dict[str, di
                 continue
             logger.debug(f"Page {page_id}: same last_edited_time but content changed — processing")
 
-        run_automations_on_page(client, page, prev_page)
-        new_snapshot[page_id] = stripped
+        post_edit_page, created = run_automations_on_page(client, page, prev_page)
+        # Use the post-edit page (returned by the API after bot writes) as the snapshot
+        # entry so the next poll's prev_page reflects what the bot left, not the pre-poll
+        # state. Only genuine user changes after the bot's writes will appear as diffs.
+        final = post_edit_page if post_edit_page is not None else page
+        new_snapshot[page_id] = _strip_files(final)
+        for new_page in created:
+            new_snapshot[new_page["id"]] = _strip_files(new_page)
+            logger.info(f"Snapshot: added bot-created page {new_page['id']} so next poll has a valid prev_page.")
 
     if pages:
         logger.info(f"  → {len(pages)} changed page(s) processed.")
