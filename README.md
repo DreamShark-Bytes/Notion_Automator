@@ -30,6 +30,7 @@ Notion's built-in automations are powerful but gated behind paid plans and limit
 - [Adding Your Own Automations](#adding-your-own-automations)
 - [Tuning Poll Interval](#tuning-poll-interval)
 - [How it compares to Notion's built-in automations](#how-it-compares-to-notions-built-in-automations)
+- [Updating](#updating)
 - [Future Plans](#future-plans)
 
 ---
@@ -283,6 +284,21 @@ Set `poll_interval` in `config.toml` (applies to all databases).
 | Outbound webhooks | ✅ (add your own code) | ✅ (paid plans) |
 | Always-on device required | ✅ (Raspberry Pi works great) | ❌ |
 | Subscription required | ❌ | ✅ |
+
+---
+
+## Updating
+
+1. Stop the service: `sudo systemctl stop notion-daemon`
+2. Back up any files you've edited: `automations.py` and `config.toml` are the only ones you're expected to modify
+3. Pull the latest changes: `git pull`
+4. Install any new dependencies: `venv/bin/pip install -r requirements.txt`
+5. Apply any Notion-side changes listed in the release notes (field renames, new select options, new columns)
+6. Update `config.toml` to match any new config format changes
+7. Start the service: `sudo systemctl start notion-daemon`
+8. Check logs to confirm governance ran cleanly: `journalctl -u notion-daemon -f`
+
+To diff your local `automations.py` against the new version before overwriting: `git diff HEAD automations.py`
 
 ---
 
