@@ -4,10 +4,15 @@
 # Your Notion integration token (Settings → Integrations → New integration)
 token = "ntn_your_token_here"
 
-# Notion database IDs to watch (one per line)
-database_ids = [
-  "your-database-id-here",
-]
+# Task databases to watch. Each [[databases]] block is one database.
+# Flags control which automations are active for that database (absent = disabled).
+[[databases]]
+id                = "your-database-id-here"
+closed_date       = true   # stamp Closed Date on close; clear on reopen (required for recurring tasks)
+reopen_count      = true   # increment Reopen Count on reopen (requires closed_date = true to be useful)
+due_date_tracking = true   # track Due Date Update Count and First Due Date
+
+# Add more [[databases]] blocks for additional task databases.
 
 # Seconds between polls
 poll_interval = 60

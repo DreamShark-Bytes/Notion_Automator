@@ -22,7 +22,7 @@ except ImportError:
         sys.exit("Python < 3.11 detected: install tomli with 'pip install tomli'")
 
 from notion_api import NotionClient
-from automations import AUTOMATIONS, GOVERNANCE
+from automations import AUTOMATIONS, GOVERNANCE, register_db as register_automation_db
 from bot_notes import clear_bot_notes, flush_bot_notes
 import recurring_tasks
 from recurring_tasks import BOT_CREATED_PAGES_KEY
@@ -84,19 +84,54 @@ def _strip_files(page: dict) -> dict:
     return cleaned
 
 
-def run_governance(client: NotionClient) -> None:
+def run_governance(client: NotionClient) -> list[dict]:
     """
     Run all registered GOVERNANCE functions, then flush and reset Bot Notes.
     Called at daemon startup and on the 2am daily cron.
+
+    Returns a list of pages created during governance so the caller can run
+    an automations init pass on them (to populate fields like Reopen Count
+    and Due Date Update Count that are only written during init).
     """
     clear_bot_notes()
+    created_pages: list[dict] = []
     for fn in GOVERNANCE:
         try:
-            fn(client)
+            result = fn(client)
+            if result:
+                created_pages.extend(result)
         except Exception as e:
             logger.error(f"GOVERNANCE function '{fn.__name__}' failed: {e}")
     flush_bot_notes(client)
     clear_bot_notes()
+    return created_pages
+
+
+def _init_pass_on_pages(
+    client: NotionClient, pages: list[dict], snapshots: dict[str, dict[str, dict]]
+) -> None:
+    """
+    Run automations in init mode (prev_page=page) on a specific list of pages and
+    insert the results into snapshots. Called after run_governance() so that pages
+    created by governance get their init-pass fields (Reopen Count, Due Date Update
+    Count, etc.) populated in the same daemon cycle rather than waiting for the next poll.
+    """
+    for page in pages:
+        db_id = page.get("parent", {}).get("database_id")
+        if not db_id or db_id not in snapshots:
+            logger.warning(
+                f"Cannot run init pass on governance-created page {page['id']}: "
+                f"db_id {db_id!r} not in snapshots — skipping."
+            )
+            continue
+        post_edit, extra_created = run_automations_on_page(client, page, page)
+        final = post_edit if post_edit is not None else page
+        snapshots[db_id][final["id"]] = _strip_files(final)
+        logger.info(f"Init pass complete on governance-created page {final['id']}.")
+        for new_page in extra_created:  # init mode should never create tasks, but be safe
+            new_db_id = new_page.get("parent", {}).get("database_id")
+            if new_db_id and new_db_id in snapshots:
+                snapshots[new_db_id][new_page["id"]] = _strip_files(new_page)
 
 
 def run_automations_init_pass(client: NotionClient, database_id: str) -> dict[str, dict]:
@@ -217,8 +252,12 @@ def poll_database(client: NotionClient, database_id: str, snapshot: dict[str, di
         final = post_edit_page if post_edit_page is not None else page
         new_snapshot[page_id] = _strip_files(final)
         for new_page in created:
-            new_snapshot[new_page["id"]] = _strip_files(new_page)
-            logger.info(f"Snapshot: added bot-created page {new_page['id']} so next poll has a valid prev_page.")
+            # Run init pass immediately on bot-created pages so fields like Reopen Count
+            # and Due Date Update Count are populated in this cycle, not deferred to the next poll.
+            post_init, _ = run_automations_on_page(client, new_page, new_page)
+            init_final = post_init if post_init is not None else new_page
+            new_snapshot[init_final["id"]] = _strip_files(init_final)
+            logger.info(f"Snapshot: added bot-created page {init_final['id']} (init pass complete).")
 
     if pages:
         logger.info(f"  → {len(pages)} changed page(s) processed.")
@@ -235,9 +274,12 @@ def main():
     if not token:
         raise RuntimeError("token is not set in config.toml")
 
-    database_ids = cfg.get("database_ids", [])
-    if not database_ids:
-        raise RuntimeError("database_ids is not set in config.toml")
+    databases = cfg.get("databases", [])
+    if not databases:
+        raise RuntimeError("No [[databases]] entries found in config.toml")
+    database_ids = [db["id"] for db in databases]
+    for db in databases:
+        register_automation_db(db["id"], db)
 
     poll_interval = cfg.get("poll_interval", 60)
 
@@ -266,7 +308,11 @@ def main():
     }
 
     # GOVERNANCE functions (startup pass — also runs daily at 2am via cron below).
-    run_governance(client)
+    # Run init pass on any pages created by governance so their fields (Reopen Count,
+    # Due Date Update Count, etc.) are populated immediately, not deferred to the next poll.
+    gov_created = run_governance(client)
+    if gov_created:
+        _init_pass_on_pages(client, gov_created, snapshots)
 
     if args.governance_only:
         logger.info("--governance-only flag set: exiting after governance pass.")
@@ -294,7 +340,9 @@ def main():
         if now_local.hour == 2 and last_governance_date != now_local.date():
             last_governance_date = now_local.date()
             logger.info("2am cron: running GOVERNANCE functions.")
-            run_governance(client)
+            gov_created = run_governance(client)
+            if gov_created:
+                _init_pass_on_pages(client, gov_created, snapshots)
 
         for db_id in database_ids:
             poll_start = _utcnow_iso()

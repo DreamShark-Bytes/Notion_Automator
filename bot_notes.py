@@ -27,9 +27,11 @@ logger = logging.getLogger(__name__)
 #  Issue code constants
 # ------------------------------------------------------------------ #
 
-RTD_DUPLICATE_NAME    = "RTD_DUPLICATE_NAME"
-RTD_MULTIPLE_OPEN     = "RTD_MULTIPLE_OPEN_TASKS"
-RTD_AT_MOST_N_REACHED = "RTD_AT_MOST_N_REACHED"
+RTD_DUPLICATE_NAME      = "RTD_DUPLICATE_NAME"
+RTD_MULTIPLE_OPEN       = "RTD_MULTIPLE_OPEN_TASKS"
+RTD_AT_MOST_N_REACHED   = "RTD_AT_MOST_N_REACHED"
+RTD_EXACTLY_N_EXCEEDED  = "RTD_EXACTLY_N_EXCEEDED"
+RTD_INVALID_ANCHOR_TIME = "RTD_INVALID_ANCHOR_TIME"
 
 # ------------------------------------------------------------------ #
 #  Accumulators

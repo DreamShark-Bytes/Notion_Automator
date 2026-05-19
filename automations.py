@@ -34,6 +34,24 @@ if TYPE_CHECKING:
 
 
 # ------------------------------------------------------------------ #
+#  Per-database automation config registry
+# ------------------------------------------------------------------ #
+
+_db_configs: dict[str, dict] = {}  # database_id → [[databases]] config entry
+
+
+def register_db(db_id: str, cfg: dict) -> None:
+    """Register a database's automation config. Called once per database at daemon startup."""
+    _db_configs[db_id] = cfg
+
+
+def _flags(page: dict) -> dict:
+    """Return the automation flags for the database this page belongs to."""
+    db_id = page.get("parent", {}).get("database_id", "")
+    return _db_configs.get(db_id, {})
+
+
+# ------------------------------------------------------------------ #
 #  Automation: manage "Closed Date" and "Reopen Count"
 # ------------------------------------------------------------------ #
 
@@ -55,6 +73,10 @@ def auto_closed_date(client: "NotionClient", page: dict, prev_page: dict | None)
       - 'Reopen Count' missing → initialize to 0.
       - Status is Complete but 'Closed Date' is empty → backfill with last_edited_time.
     """
+    flags = _flags(page)
+    if not flags.get("closed_date"):
+        return {}
+
     STATUS_FIELD       = "Status"
     DONE_GROUP         = "Complete"
     CLOSED_DATE_FIELD  = "Closed Date"
@@ -68,8 +90,8 @@ def auto_closed_date(client: "NotionClient", page: dict, prev_page: dict | None)
 
     updates = {}
 
-    # Governance: initialize Reopen Count if missing
-    if reopen_count is None:
+    # Governance: initialize Reopen Count if missing (only if reopen_count tracking is enabled)
+    if flags.get("reopen_count") and reopen_count is None:
         updates[REOPEN_COUNT_FIELD] = {"number": 0}
         reopen_count = 0
 
@@ -86,7 +108,8 @@ def auto_closed_date(client: "NotionClient", page: dict, prev_page: dict | None)
     if prev_page is not None and prev_group == DONE_GROUP and current_group != DONE_GROUP:
         logger.info("Status moved out of Complete — clearing Closed Date, incrementing Reopen Count")
         updates[CLOSED_DATE_FIELD] = {"date": None}
-        updates[REOPEN_COUNT_FIELD] = {"number": reopen_count + 1}
+        if flags.get("reopen_count"):
+            updates[REOPEN_COUNT_FIELD] = {"number": reopen_count + 1}
         return updates
 
     # Governance: non-Complete task still has a Closed Date — missed reopen while daemon was down.
@@ -94,9 +117,10 @@ def auto_closed_date(client: "NotionClient", page: dict, prev_page: dict | None)
     # This preserves intentionally pre-filled Closed Dates so they survive until the user
     # actually closes the task. The explicit reopen transition above handles the live case.
     if current_group != DONE_GROUP and closed_date and prev_page is page:
-        logger.info("Governance: non-Complete task has Closed Date — missed reopen; incrementing Reopen Count and clearing Closed Date")
-        updates[REOPEN_COUNT_FIELD] = {"number": reopen_count + 1}
+        logger.info("Governance: non-Complete task has Closed Date — missed reopen; clearing Closed Date, incrementing Reopen Count")
         updates[CLOSED_DATE_FIELD] = {"date": None}
+        if flags.get("reopen_count"):
+            updates[REOPEN_COUNT_FIELD] = {"number": reopen_count + 1}
         return updates
 
     # Governance: already Complete but Closed Date never set — backfill.
@@ -132,7 +156,11 @@ def auto_due_date_update_count(_client, page: dict, prev_page: dict | None) -> d
       - Due Date is cleared
       - Due Date is unchanged
       - Only the time component of Due Date changed (date must change to count)
+
+    Disabled entirely if 'due_date_tracking' is not set for this database in config.toml.
     """
+    if not _flags(page).get("due_date_tracking"):
+        return {}
     DATE_FIELD       = "Due Date"
     COUNTER_FIELD    = "Due Date Update Count"
     FIRST_DATE_FIELD = "First Due Date"

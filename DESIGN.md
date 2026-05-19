@@ -13,6 +13,20 @@ It is intentionally write-back only: the daemon reads from Notion and writes to 
 
 ---
 
+## 1.1 Design Principles
+
+These principles take precedence when individual decisions conflict. They are not re-debated per-feature — reference them in the Decision Log when a decision follows or deliberately departs from them.
+
+**Minimum surprise.** The bot should never take an action the user would not expect given what they just did. Changing an RTD field should not silently delete a task. Closing a task should not silently alter the RTD.
+
+**Least-destructive intervention.** Prefer informing over acting. When the bot must intervene, prefer the reversible action over the irreversible one: a bot note over an archive, an archive over a delete, a cancel over a hard delete. If a consequential action must be taken (e.g. auto-cancel on grace period expiry), it is always part of an explicitly designed and documented behavior the user opted into by configuring the RTD.
+
+**Put consequential decisions in the user's hands.** The bot flags, warns, and suggests via Bot Notes and logs. It does not make permanent decisions on behalf of the user unless the feature explicitly requires it and the user has configured it. Example: when a task is deleted, the bot creates a replacement with a visible note rather than silently deactivating the series — the user decides whether to continue or stop.
+
+**Bot-managed fields are owned exclusively by the bot.** Users should not need to manually edit fields the bot writes (Period Key, Occurrence #, Closed Date, Bot Notes). If a field drifts, governance corrects it. If a user edits a bot field, the bot will overwrite it at the next poll — this is documented as a known limitation, not a supported workflow.
+
+---
+
 ## 2. High-Level Architecture
 
 ```
@@ -42,7 +56,7 @@ It is intentionally write-back only: the daemon reads from Notion and writes to 
 | `run_automations_init_pass()` | Fetches ALL pages from a database on startup. Runs every function in `AUTOMATIONS` with `prev_page=page` (per-page governance only — no change detection fires). Pages are discarded after processing — not stored in the snapshot.                                                                                                                                                                                                                    |
 | `run_governance()`            | Iterates `GOVERNANCE` and calls each function with `client`. Runs once at startup after all per-page governance passes are complete. This is the cross-page extension point — each function sees the full database state and acts on patterns that span multiple pages. After all GOVERNANCE functions complete, flushes the `Bot Notes` accumulator — writes `Bot Notes` to every affected page and clears the field on pages with no current issues. |
 | `poll_database()`             | Fetches only pages edited since the last poll (using Notion's `last_edited_time` filter). Runs full automations (governance + change detection). Returns updated snapshot.                                                                                                                                                                                                                                                                             |
-| `run_automations_on_page()`   | Calls every function in `AUTOMATIONS`, collects returned update dicts, and patches Notion if anything changed.                                                                                                                                                                                                                                                                                                                                         |
+| `run_automations_on_page()`   | Calls every function in `AUTOMATIONS`, collects returned update dicts, and patches Notion if anything changed. Returns `(post_edit_page, created_pages)`: `post_edit_page` is the page as returned by the Notion API after the bot write (becomes the next poll's `prev_page`, so change-detection sees the bot's own values rather than stale pre-write state); `created_pages` is a list of pages created by automations (e.g. a new recurring task), inserted into the snapshot so the next poll has a valid `prev_page` for them. Automations signal new pages via the `BOT_CREATED_PAGES_KEY` sentinel key in their return dict. |
 | `_strip_files()`              | Removes `files`-type properties from a page dict before storing in the in-memory snapshot. Keeps memory footprint clean; attachments are not needed for automation logic.                                                                                                                                                                                                                                                                              |
 | `_utcnow_iso()`               | Returns current UTC time floored to the minute, matching Notion's `last_edited_time` resolution.                                                                                                                                                                                                                                                                                                                                                       |
 
@@ -248,8 +262,7 @@ The key pattern: during the startup governance pass, `prev_page=page` is passed 
 - Status transitions **out of** the `Complete` group (reopen)
 
 **On close (non-Complete → Complete):**
-- **Recurring task** (has a `Recurring Series` relation): stamp `Closed Date` with `now()` only if `Closed Date` is currently empty. If the user has already set it (e.g. retroactive date), leave it unchanged — `Closed Date` feeds period counting and `_create_next_task` period key derivation.
-- **Non-recurring task**: always stamp `Closed Date` with `now()`, regardless of current value.
+- Stamp `Closed Date` with `now()` only if `Closed Date` is currently empty. If the user has already set it, leave it unchanged. This applies to all task types — there is no distinction between recurring and non-recurring tasks. A pre-filled `Closed Date` is treated as intentional (e.g. retroactive dating, or data entered while the field was misnamed). For recurring tasks, `Closed Date` additionally feeds period counting and `_create_next_task` period key derivation.
 
 **On reopen (Complete → non-Complete):**
 - Clear `Closed Date` (set to null) — ensures the next close gets a fresh, accurate stamp.
@@ -303,9 +316,7 @@ Disabled by default. Enable by adding it to the `AUTOMATIONS` list.
 
 ---
 
-## 7. Planned Features
-
-### 7.1 Recurring Tasks
+## 7. Recurring Tasks
 
 Recurring tasks enable habit and responsibility tracking by creating a new task whenever the current one is completed or cancelled. This preserves a full history of completions and supports trend reporting — unlike simply re-opening a task.
 
@@ -319,15 +330,15 @@ Recurring tasks enable habit and responsibility tracking by creating a new task 
 
 #### Recurring Task Definitions database
 
-The definitions database is created manually by the user (see README §6). Automated creation via the Project Page is planned (§7.2).
+The definitions database is created manually by the user (see README §6). Automated creation via the Project Page is planned (see STATUS.md Planned Features).
 
 | Field                  | Type                   | Notes                                                                                                                                                                                                                                                                                                           |
 | ------------------------| ------------------------| -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Name                   | Title                  |                                                                                                                                                                                                                                                                                                                 |
 | Type                   | Select                 | `Habit`, `Bad Habit`, `Responsibility`. See Task type behaviour below.                                                                                                                                                                                                                                          |
 | Active                 | Checkbox               | Uncheck to pause without deleting                                                                                                                                                                                                                                                                               |
-| Cadence Type           | Select                 | `Once per period`, `At most N per period`, `Minimum N per period`, `Unlimited`. **Bad Habit ignores this field — always treated as Unlimited.**                                                                                                                                                                 |
-| Cadence N              | Number                 | Used by `At most N per period` and `Minimum N per period`; blank for others. **Bad Habit: ignored.**                                                                                                                                                                                                            |
+| Cadence Type           | Select                 | `Once per period`, `Exactly N per period`, `At most N per period`, `Minimum N per period`, `Unlimited`. **Bad Habit ignores this field — always treated as Unlimited.**                                                                                                                                        |
+| Cadence N              | Number                 | Used by `Exactly N per period`, `At most N per period`, and `Minimum N per period`; blank for others. **Bad Habit: ignored.**                                                                                                                                                                                   |
 | Period                 | Select                 | `Day`, `Week`, `Month`, `Year`. **Bad Habit: used for Instance # reset cadence only — no effect on due dates or cadence limits.**                                                                                                                                                                               |
 | Anchor Day             | Number                 | Mon=1 … Sun=7 for weekly; 1–31 for monthly (overflows to last day of month). **Bad Habit: ignored.**                                                                                                                                                                                                            |
 | Anchor Time            | Text                   | e.g. `13:00`; blank = no specific time. **Bad Habit: ignored.**                                                                                                                                                                                                                                                 |
@@ -348,8 +359,8 @@ Fields specific to recurring task functionality are named with the suffix `(Recu
 | Field                                | Type               | Notes                                                                                                                                                                                                                                                                                                                 |
 | --------------------------------------| --------------------| -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Recurring Series                     | Relation           | Points to the RTD database                                                                                                                                                                                                                                                                                            |
-| Instance # (Recurring Task)          | Number             | Set by bot at creation; see counting rules below                                                                                                                                                                                                                                                                      |
-| Period Key (Recurring Task)          | Text               | Canonical period string set by bot (e.g. `2026-04`, `2026-W15`). **Functionally used only while the task is open** — for open tasks it is the period attribution source. Once closed, Closed Date becomes the ground truth and Period Key is ignored by all bot logic (reference label only).                          |
+| Occurrence # this Period (Recurring Task) | Number        | Set by bot at creation; see counting rules below                                                                                                                                                                                                                                                                      |
+| Period Key (Recurring Task)          | Text               | **Display-only label** set by bot (e.g. `2026-04`, `2026-W15`). Never read by bot logic for period comparisons. Period membership is always derived from Due Date (open tasks) or Closed Date (closed tasks) — see counting rules below.                                                                              |
 | Period Target (Recurring Task)       | Text               | Human-readable goal set by bot (e.g. `Minimum 3 per Week`)                                                                                                                                                                                                                                                            |
 | Ignore Grace Period (Recurring Task) | Checkbox           | Default: False. Bot sets to True when a user re-opens a Responsibility task from the Complete group. Once True, **never reset by the bot** — that task instance is permanently ignored by grace period auto-close. The user owns closure entirely. New tasks created from this task's closure start fresh with False. |
 | Is Open                              | Formula → Checkbox | `prop("Status") == "Not started" or prop("Status") == "In progress" or prop("Status") == "On hold"`. Used as rollup target for "Number of Open Tasks" on the RTD. User-created Notion formula — bot never writes it.                                                                                                  |
@@ -359,11 +370,11 @@ Fields specific to recurring task functionality are named with the suffix `(Recu
 
 #### Due date range logic
 
-| Anchor Day | Anchor Time | Due Date on new task |
-|---|---|---|
-| empty | empty | Full period span (e.g. April 1 → April 30) |
-| set | empty | That day only, no time (e.g. April 15) |
-| set | set | That day + time (e.g. Monday 1:00 PM) |
+| Anchor Day | Anchor Time | Due Date on new task                       |
+| ------------| -------------| --------------------------------------------|
+| empty      | empty       | Full period span (e.g. April 1 → April 30) |
+| set        | empty       | That day only, no time (e.g. April 15)     |
+| set        | set         | That day + time (e.g. Monday 1:00 PM)      |
 
 `Unlimited` cadence: no due date ever.
 `At most N per period` cadence: no due date ever — tracks occurrences, not scheduled events.
@@ -375,17 +386,19 @@ Instance # is assigned at task creation by counting existing tasks, not by readi
 
 **Assignment rule at `_create_next_task` time:**
 
-| Cadence type | Instance # assigned to new task |
-|---|---|
-| Once per period | Count of all tasks for this RTD in the current period + 1 |
+| Cadence type         | Instance # assigned to new task                           |
+| ----------------------| -----------------------------------------------------------|
+| Once per period      | Count of all tasks for this RTD in the current period + 1 |
 | At most N per period | Count of all tasks for this RTD in the current period + 1 |
 | Minimum N per period | Count of all tasks for this RTD in the current period + 1 |
-| Unlimited | Count of all tasks for this RTD in the current period + 1 |
+| Unlimited            | Count of all tasks for this RTD in the current period + 1 |
 
-"Tasks for this RTD in the current period" is determined per-task based on what information is available:
+"Tasks for this RTD in the current period" is determined per-task by `_task_in_period`:
 
-- **Open tasks** (no `Closed Date`): match on `Period Key (Recurring Task)` = current period key. The bot's period assignment is the only reference.
-- **Closed tasks**: match on `Closed Date` falling within the current period's date range. Ground truth — `Period Key` on the closed task is ignored. Handles retroactive Closed Date edits correctly.
+- **Open tasks** (no `Closed Date`): period derived from **Due Date**. If Due Date is absent, falls back to `now()` — an undated open task always counts as belonging to the current period.
+- **Closed tasks**: period derived from **Closed Date** (ground truth). `auto_closed_date` governance backfills `last_edited_time` as Closed Date for any Complete task missing it, so this is always available. Handles retroactive Closed Date edits correctly.
+- **Non-completion statuses** (Cancelled, Skipped, Missed, etc.): always excluded from counts — they represent missed/skipped attempts, not completions.
+- The `Period Key (Recurring Task)` field is **never read** for period comparisons — it is a display label only.
 
 `query_database` is used, so archived and permanently deleted tasks are excluded from the count — if tasks were deleted, the sequence restarts from the remaining count (acceptable; deleted tasks remove their slot).
 
@@ -417,7 +430,7 @@ Grace period evaluation is **cron-only** — it runs in a GOVERNANCE function at
 
 **Grace period cap when grace period exceeds the period length:**
 
-If a task belongs to a past period (its `Period Key` is stale) and the stated Grace Period would keep it open indefinitely, a hard cap applies: cancel the task if `now >= current_period_start + 1 day`. This means:
+If a task's Due Date falls in a past period and the stated Grace Period would keep it open indefinitely, a hard cap applies: cancel the task if `now >= current_period_start + 1 day`. This means:
 - At the first 2am cron of a new period: new task is created; old carry-over task is not yet cancelled (given 1 day of grace)
 - At the second 2am cron (Day 2 of new period): cap fires; old task cancelled regardless of stated Grace Period value
 
@@ -494,10 +507,10 @@ The 2am cron runs the full governance suite. At period boundary it performs two 
 
 **1. Carry-over: open task from the previous period**
 
-If the current open task's `Period Key (Recurring Task)` does not match the new period key (i.e. the task was never closed and carried over from the previous period):
+If the current open task's **Due Date** falls in a previous period (i.e. the task was never closed and carried over), it is stale. For Responsibilities, the grace-period-cap auto-cancel handles this. For other types, governance updates the display fields:
 
-- Update `Period Key (Recurring Task)` to the current period key
-- Update `Instance # (Recurring Task)` per the cadence rules: reset to 1 for `Once per period`, `At most N per period`, `Minimum N per period`; continue incrementing for `Unlimited`; never reset for `Bad Habit`
+- Update `Period Key (Recurring Task)` (display label) to the current period key
+- Update `Occurrence # this Period (Recurring Task)` per the cadence rules: reset to 1 for `Once per period`, `At most N per period`, `Minimum N per period`; continue incrementing for `Unlimited`; never reset for `Bad Habit`
 
 This keeps the open task's bot-managed fields accurate without closing or replacing it.
 
@@ -520,7 +533,7 @@ If the cron finds an open task with a `Due Date` that fell in a future period th
   - *`Tasks Done This Period` counting* — uses `Closed Date` date as ground truth. A retroactively set Closed Date (e.g. user marks a task closed and sets Closed Date to last week) automatically counts toward the correct past period. No special handling needed.
   - *Next task creation (Instance # and Period Key)* — `_create_next_task` must determine whether a new period has started by computing the period key from the closed task's `Closed Date` date, **not** from its `Period Key` field. If it used `Period Key` field, a retroactive Closed Date would leave Period Key pointing to the current period → `new_period = False` → Instance # increments instead of resetting. Closed Date date is the ground truth for which period a completion belongs to.
 
-    **Same-poll-cycle exception:** `auto_closed_date` and `auto_recurring_tasks` run in the same poll cycle. Automations collect updates in-memory and apply them together at the end of the cycle, so `Closed Date` is not yet committed to Notion when `_create_next_task` runs. In this case, `_create_next_task` falls back to reading the task's `Period Key (Recurring Task)` field directly to determine whether a period boundary was crossed. The practical effect is transparent — period detection still works correctly for normal close events.
+    **Same-poll-cycle note:** `auto_closed_date` and `auto_recurring_tasks` run in the same poll cycle. Automations collect their updates in-memory and write them to Notion together at the end of the cycle, so `Closed Date` stamped by `auto_closed_date` may not yet be in the page object when `_create_next_task` runs. `_create_next_task` upserts `closed_task` (the current page object) into its fetched task list before calling `_task_in_period`. If the user pre-filled `Closed Date` before marking Done, `_task_in_period` uses it directly. If `Closed Date` is absent (will be stamped by `auto_closed_date` after the poll), `_task_in_period` takes the open-task branch and uses the task's `Due Date` (or `now()` if absent). A task completed by the user in the current period will have a `Due Date` in the current period, so the period count is correct regardless. No `Period Key` fallback is used.
 
 **3. Reset `Tasks Done This Period` on the RTD**
 
@@ -529,120 +542,12 @@ After the carry-over and promotion checks, the cron recomputes `Tasks Done This 
 #### Known gaps
 
 - Deleted/archived tasks: detected via `Current Open Task` field + direct `GET /v1/pages/{id}` call during governance. Both "Move to Trash" (`archived: true`) and permanent deletion (404) are treated identically — replacement task created with note and On Hold status. See Governance Invariant and Deletion Reaction above.
-- Task naming with cadence suffix (e.g. `Weekly Therapy — Apr 2026`): deferred to the Configuration design (§7.2).
+- Task naming with cadence suffix (e.g. `Weekly Therapy — Apr 2026`): deferred — depends on Project Page / configuration design (see STATUS.md Planned Features).
 
 ---
 
-### 7.2 Task Dependency / Blocking Tracking
 
-**Status: Planned — not yet implemented.**
 
-#### Purpose
-
-Allow tasks to declare what is blocking them (within or outside the database) and what they are blocking. Useful for surfacing "On Hold" tasks that are legitimately stalled on an external dependency vs. ones that are simply forgotten.
-
-#### Proposed fields (user-managed, bot never writes)
-
-| Field              | Type                   | Notes                                                                                                     |
-| --------------------| ------------------------| -----------------------------------------------------------------------------------------------------------|
-| `Blocked By`       | Relation → MT database | Tasks in the same database that must complete first                                                       |
-| `Is Blocking`      | Relation → MT database | Synced reverse of `Blocked By` — auto-populated by Notion                                                 |
-| `External Blocker` | Text                   | Free-text description of blockers outside the database (e.g. "waiting on vendor", "pending legal review") |
-
-#### Interaction with recurring task logic
-
-If a Responsibility task is "On Hold" due to an external blocker and would otherwise be grace-period auto-cancelled, the user sets `Ignore Grace Period (Recurring Task) = True` on that task. No new bot logic needed — the existing flag covers this case.
-
-#### Bot scope
-
-None at this stage. These are purely informational fields the user maintains. Future automation possibilities (e.g. auto-setting "On Hold" when `Blocked By` is non-empty) are deferred.
-
----
-
-### 7.3 Change Tracking
-
-**Status: Planned — not yet implemented.**
-
-#### Purpose
-
-Opt-in field change monitoring. When enabled for a specific field, every detected change is recorded with old value, new value, page ID, and timestamp. Intended for reporting and point-in-time snapshots via Notion_PowerBI or similar.
-
-#### Design principles
-
-- **Opt-in by default** — no fields are tracked unless explicitly configured. Prevents accidental capture of large or sensitive fields.
-- **Excluded field types** — `files`, `rich_text` above a configurable length threshold. These are too large and too noisy for meaningful change tracking.
-- **Storage TBD** — candidates are a local SQLite database, a CSV/JSONL append log, or a dedicated Notion database. Local storage is preferred to avoid Notion API overhead on every change.
-
-#### Configuration (sketch)
-
-```toml
-[change_tracking]
-enabled = true
-fields = ["Status", "Due Date", "Assignee"]  # opt-in list
-```
-
-#### Record schema (sketch)
-
-| Field | Description |
-|---|---|
-| `timestamp` | UTC time the change was detected |
-| `page_id` | Notion page ID |
-| `database_id` | Notion database the page belongs to |
-| `field_name` | Property name that changed |
-| `old_value` | Previous value (serialized) |
-| `new_value` | New value (serialized) |
-
-#### Relationship to in-memory snapshot
-
-The in-memory snapshot already holds previous page state for change detection. Change tracking reads from the same snapshot — no extra API calls. The snapshot's `_strip_files()` behavior naturally excludes file properties.
-
----
-
-### 7.4 Project Page
-
-**Status: Planned — not yet implemented.**
-
-#### Purpose
-
-A single Notion page per project acts as its home base. It serves as:
-
-- The **parent page** under which the daemon auto-creates any required databases on first run (e.g. the Recurring Task Definitions database). Users can move created pages anywhere — Notion page IDs are permanent.
-- A **status dashboard** showing last poll time, health indicators, and recent errors.
-- A **configuration surface** for settings that change frequently or that non-technical users need to adjust (e.g. toggling a series active/inactive, adjusting grace periods).
-
-#### Bootstrap flow
-
-1. User creates the Project Page in Notion and connects the integration to it (one-time manual step).
-2. User adds the Project Page ID to `config.toml`.
-3. On first run, the daemon detects missing databases and creates them as children of the Project Page, then writes their IDs into `config.toml` (or logs them for the user to copy).
-4. Subsequent runs read from the Project Page for configuration and write status back to it.
-
-#### Setup strategy
-
-On first run the bot detects the Project Page ID from `config.toml` and creates any missing child databases (e.g. the RTD database) as children of that page. The user points the bot at the Project Page — the bot fills in the rest. Users can move created pages anywhere afterwards; Notion page IDs are permanent so the bot tracks by ID, not location.
-
-User-prompted setup (wizard-style) and fully automatic setup are both considered. Current preference: automatic with a clear startup log of what was created.
-
-#### Auto-detection over activation buttons
-
-No explicit "activate" button is needed. The daemon detects what exists and creates what is missing. This makes setup transparent and restarts safe.
-
-#### Required NotionClient additions
-
-`create_database(parent_page_id, title, properties)` — to be added to `notion_api.py` when this feature is implemented.
-
-#### Configuration through Notion
-
-Fields on the Project Page (or child databases) that the daemon reads as configuration:
-- Recurring task field copy exclusions (which fields to skip beyond the defaults in `FIELDS_NOT_INHERITED`)
-- Task naming format (whether to append cadence info to the name)
-- Notification settings (Discord/Telegram webhook URLs, alert conditions)
-
-#### Notifications (future)
-
-A `notifiers.py` utility in Notion_Automator will handle outbound webhooks (Discord, Telegram). Automations call it as a side effect — it is not part of the `automations.py` return-dict pattern.
-
----
 
 ## 8. Adding a New Automation
 
@@ -663,14 +568,17 @@ No changes to `daemon.py` or `notion_client.py` are needed for new automations.
 - **No retry logic.** If a Notion API call fails, the error is logged and that page is skipped until the next poll.
 - **File/attachment properties are excluded from the snapshot** but are still visible in Notion. Automations cannot act on file contents.
 - **Archived pages are invisible to `query_database`** but remain fetchable by ID via `get_page()`. The bot explicitly checks `page.get("archived")` whenever fetching `Current Open Task` directly.
+- **User edits to bot-managed fields made mid-poll are silently overwritten.** If a user edits a field (e.g. `Closed Date`, `Period Key`) between when the daemon fetched the page and when it writes its computed values, the bot's write wins. The daemon has no mechanism to detect or merge concurrent edits. This is an inherent limitation of polling-based automation without optimistic locking.
 
 ---
 
 ## 10. Decision Log
 
-Resolved design decisions, in order. Each entry states the rule and the reason so future contributors don't re-litigate them.
+Resolved design decisions. Each entry states the rule and the reason so future contributors don't re-litigate them. All entries are final — open decisions live in STATUS.md.
 
 ---
+
+### Task & Series Behavior
 
 **[Q1] When a recurring task is deleted or archived, the bot creates a replacement — not deactivates the RTD.**
 - Reason: the bot cannot distinguish intentional deletion from accidental deletion. Creating a replacement with a visible note puts the decision in the user's hands. To stop a series, the user sets `Active = False` on the RTD.
@@ -705,10 +613,22 @@ Resolved design decisions, in order. Each entry states the rule and the reason s
 **[Fields] `Manual Created Date` is user-managed only — bot never writes it.**
 - Reason: used for retroactively created tasks where the user wants accurate reporting dates. No bot logic depends on it.
 
+**[RTD Start Date] Automated RTD activation via a Start Date field is not implemented.**
+- User activates RTDs manually by setting Status to Active. The manual step is lightweight.
+- The motivating use cases (returning from vacation, seasonal responsibilities) are better served by reminder tasks the user already creates.
+- Adding a Start Date field would introduce a second activation mechanism alongside Status, complicate governance logic, and require RTD monitoring for real-time response — complexity not justified by the benefit.
+
+### Governance Behavior
+
 **[Q2a] Cadence type formerly called "N per period" is renamed "At most N per period".**
 - Reason: "N per period" implied exactly N. "At most N" correctly frames it as a soft cap — the bot continues creating tasks past N but alerts the user. Instance # increments within the period and resets at period boundary via the 2am cron.
 - No due dates for this cadence type — occurrence tracking only. Enforced in `_calc_due_date`: `At most N per period` returns `None` alongside `Unlimited`.
 - Alert mechanism when N is reached: `RTD_AT_MOST_N_REACHED` Bot Note on the RTD (see [Q12]).
+
+**[Q2a-ii] "Exactly N per period" is the canonical name for the hard-quota cadence type. The legacy Notion select option "N per period" must be renamed.**
+- Behavior: governance counts completions in the current period (excluding cancelled/skipped). When count ≥ N, the next task is routed to the next period (`force_next=True`). If completions somehow exceed N, `RTD_EXACTLY_N_EXCEEDED` Bot Note is added to the RTD.
+- Differs from "At most N per period": "At most N" is a soft cap (bot keeps creating, just warns). "Exactly N" is a hard quota (bot routes to next period once N is met).
+- The legacy code normalization (`"N per period" → "Exactly N per period"`) has been removed. The Notion select option must be renamed before deploying.
 
 **[Q2b] Three RTD types: Habit, Bad Habit, Responsibility — all in one RTD database.**
 - Reason: user wants Habits and Bad Habits conceptually unified. Habits and Responsibilities share 12/15 fields — separating them gains little and doubles config burden.
@@ -751,7 +671,7 @@ Resolved design decisions, in order. Each entry states the rule and the reason s
 
 **[Q10] Task name suffix / period progress indicator: user-built Notion formula, no bot involvement.**
 - Reason: consistent with the policy of not modifying user content fields. Bot-managed name suffixes would conflict with user edits, require updates as other fields change, and add complexity for no benefit over a native Notion formula.
-- User formula example: `format(prop("Instance # (Recurring Task)")) + " of " + prop("Period Target (Recurring Task)")` — displays "2 of Minimum 3 per Week" using fields already written by the bot. No new fields needed.
+- User formula example: `format(prop("Occurrence # this Period (Recurring Task)")) + " of " + prop("Period Target (Recurring Task)")` — displays "2 of Minimum 3 per Week" using fields already written by the bot. No new fields needed.
 - Period Progress as a rollup: users can surface `Tasks Done This Period` from the RTD back to the task via the `Recurring Series` relation rollup. Fully Notion-native, zero bot work.
 
 **[Q9] RTD Name uniqueness: warn via `Bot Notes` field, do not enforce or auto-rename.**
@@ -763,7 +683,7 @@ Resolved design decisions, in order. Each entry states the rule and the reason s
 - Reason: without a cap, an arbitrarily large grace period (e.g. 9999 days) leaves a stale task open indefinitely alongside an ever-growing chain of new tasks. The cap limits overlap to at most 2 open tasks for at most 1 day.
 - "Close" means Cancelled — same as normal grace period expiry, which triggers next-task creation.
 - Enforced at runtime by the cron, not at task creation time. The stated Grace Period value is not modified.
-- Implementation: if `task.Period Key != current period key` AND `now >= current_period_start + 1 day` → cancel, regardless of grace period value.
+- Implementation: if task's `Due Date` falls in a past period (derived via `_period_key`) AND `now >= current_period_start + 1 day` → cancel, regardless of grace period value. `Due Date` is used as ground truth; the stored `Period Key (Recurring Task)` field is never read for this comparison.
 
 **[Q6] Grace period auto-close is evaluated by the 2am cron only — not during the regular poll loop.**
 - Reason: the user may be mid-edit when the condition becomes true. Firing within 60 seconds would cancel a task the user is actively working on. The cron gives the full day to react.
@@ -790,7 +710,7 @@ Resolved design decisions, in order. Each entry states the rule and the reason s
 - Reason: real-time increments would go stale during any daemon downtime. Computing from `Closed Date` dates in Notion at startup and 2am cron guarantees accuracy regardless of restarts or missed events.
 - Count: related MT tasks where `Closed Date` falls within the current period's date range. `Closed Date` is used as ground truth — not `Period Key` field matching.
 - No extra queries needed: task data is already fetched inside `run_recurring_governance`.
-- The 2am cron also updates `Period Key (Recurring Task)` and `Instance # (Recurring Task)` on any open task that carried over from a previous period (see §7.1 Period boundary behavior).
+- The 2am cron also updates `Period Key (Recurring Task)` and `Occurrence # this Period (Recurring Task)` on any open task that carried over from a previous period (see §7.1 Period boundary behavior).
 
 **[Q4] `Previous Task (Recurring Task)` field and `Link Previous Tasks` RTD checkbox removed — no bot logic needed.**
 - Reason: the original intent (easy reference to the prior instance, e.g. to copy a car mileage reading) is fully achievable via a Notion sorted view of the Recurring Series relation: sort by Closed Date (primary, descending) → Due Date (secondary) → Created Date (tertiary). The most recently closed task surfaces at the top. No bot work required; no schema overhead.
@@ -798,8 +718,15 @@ Resolved design decisions, in order. Each entry states the rule and the reason s
 **[Fields] MT database recurring task fields use `(Recurring Task)` suffix in their names.**
 - Reason: distinguishes bot-managed recurring task fields from general task fields at a glance in the Notion UI.
 
+### Architecture
+
 **[Architecture] The 2am cron is a time-triggered run of the full governance suite — not a separate process or registry.**
 - Reason: the governance suite (per-page AUTOMATIONS pass + cross-page GOVERNANCE pass) already does exactly what the cron needs. Adding a separate cron system would duplicate infrastructure for no benefit.
+
+**[Architecture] Webhook-based event delivery is not used — polling is the delivery mechanism.**
+- Notion webhooks require a publicly reachable HTTPS endpoint. On a home server behind NAT, this means port forwarding + SSL cert management, or a tunnel service (e.g. Cloudflare Tunnel) that requires a domain and a second daemon. Either option meaningfully raises the setup bar for semi-technical users.
+- More importantly, the edge cases and workaround logic in the bot are not caused by polling — they stem from Notion's loose data model (missing fields, renameable columns, no push on deletion). Webhooks would not simplify any of that logic. The correct mitigations are Project Page (surface errors to the user) and field names as config (catch renames at a single point).
+- On daemon downtime, a governance/catch-up poll on restart already recovers missed events — the same safety net webhooks would need anyway.
 - Implementation: `_is_cron_time()` check inside the poll loop triggers the same two-phase sequence as startup. Any function needing period-boundary execution belongs in the existing registries.
 
 **[Architecture] `GOVERNANCE` registry added alongside `AUTOMATIONS` in `automations.py`.**
@@ -808,36 +735,43 @@ Resolved design decisions, in order. Each entry states the rule and the reason s
 - Runs globally (once at startup, not per-database) — per-database governance is not supported; complexity without a demonstrated need.
 - `daemon.py` calls `run_governance(client)` (formerly `run_governance_functions`) which iterates `GOVERNANCE`, replacing the hardcoded `run_recurring_governance(client)` call.
 
+### Bug Fixes & Code Changes
+
+**[Z16] Post-edit snapshot: `run_automations_on_page` stores the post-write page as `prev_page` for the next poll.**
+- Reason: before this fix, the snapshot stored the pre-edit page state. On the next poll, the bot's own writes appeared as "user changes" and could trigger spurious re-runs of change-detection automations.
+- Implementation: `update_page_properties` returns the updated page from the Notion API. This `post_edit_page` is stored as the snapshot entry, so the next poll's `prev_page` already reflects the bot's values. Bot-created pages (new recurring tasks) are returned via the `BOT_CREATED_PAGES_KEY` sentinel key in the automation's return dict, inserted into the snapshot immediately so the next poll has a valid `prev_page` for them.
+
+**[Z17] `_period_dates` anchor-day bug: weekly anchor-day tasks were computing the wrong week on days past the anchor.**
+- Root cause: an `elif not use_next and days_ahead < 0: days_ahead += 7` branch added 7 days when governance ran on a day after the anchor, pushing the target date into next week.
+- Fix: removed the `elif` branch. `days_ahead` is now allowed to be negative for current-period lookups. The resulting `target_date` falls in the correct ISO week because negative offsets from Saturday still land in W20 (not W21).
+- Impact: Occurrence # and period boundary detection now use the correct week for any governance run after the anchor day within the same week.
+
+**[Z18] Period Key corruption: stale-check false-cancels from trailing whitespace in the stored `Period Key` field.**
+- Root cause: Notion's rich-text editor sometimes appends a newline when a user closes a page. A stored value of `"2026-W19\n"` compared lexicographically as less than `"2026-W20"`, triggering the stale check and auto-cancelling an active task.
+- Fix (part 1): the stale check now derives the task's period from `Due Date` (or `now()` if absent) instead of reading the stored `Period Key` field. A corrupted Period Key field cannot affect cancel decisions.
+- Fix (part 2): all remaining reads of the stored `Period Key` field now call `.strip()` before comparison to guard against latent whitespace in any code path that still reads the field.
+
+**[Z19] Period Key removed from all period-membership logic — derived from dates in memory.**
+- Reason: the stored `Period Key (Recurring Task)` field was a repeated failure point. Users accidentally introduced trailing newlines (Z18); bot stamps could land on the wrong week (Z17); manual edits could corrupt it. Removing it from logic eliminates the entire class of field-corruption bugs.
+- Rule: open tasks → period determined by `Due Date` (fallback: `now()`, meaning no-Due-Date open tasks always count as current period); closed tasks → period determined by `Closed Date` (backfilled from `last_edited_time` by `auto_closed_date` governance for any Complete task missing it).
+- `Period Key (Recurring Task)` field is retained as a display-only label written by the bot for human readability in Notion. It is never read by bot logic for period comparisons anywhere in the codebase.
+- Initialization gate changed from `period_key is None and instance_num is None` to just `instance_num is None` — removes the last read of the stored Period Key field from governance initialization.
+
+**[Field rename] `Instance # (Recurring Task)` → `Occurrence # this Period (Recurring Task)`.**
+- Reason: "Instance #" was ambiguous — it sounded like a global sequence number across all periods rather than a within-period count. "Occurrence # this Period" is self-documenting.
+- Bot writes use the new field name. The old field name must be retired in the Notion database before deploying updated code (bot writes to a non-existent field fail silently).
+
+**[Per-database automation config] Automations are enabled per-database via `[[databases]]` blocks in `config.toml` (replaces flat `database_ids` list).**
+- Flags: `closed_date`, `reopen_count`, `due_date_tracking`. Absent = disabled (opt-in).
+- Rationale: prevents batch-poisoning — if a flag's column doesn't exist, that flag is simply disabled rather than causing a 400 error that silently rejects the entire update batch (including writes to other columns like Closed Date).
+- Implementation: `automations.py` holds `_db_configs: dict[str, dict]`. `register_db(db_id, cfg)` is called once per database at startup. Each automation reads `page["parent"]["database_id"]` to look up its flags — no signature changes to automation functions.
+- Closed Date is required for recurring tasks to function. If absent from the task database schema, a CRITICAL error is logged at governance startup.
+
+**[Optional task fields] `Period Key`, `Occurrence # this Period`, and `Period Target` are optional columns in the task database.**
+- Users who do not want these columns in Notion can omit them. The bot will not crash and will not produce 400 API errors — writes to absent optional fields are silently skipped.
+- Required fields (Status, Due Date, Recurring Series, etc.) are not filtered — a 400 on those still surfaces correctly.
+- Implementation: on first governance or automation run, the bot queries the task database schema via `GET /v1/databases/{id}` and caches the property set for the session (`_task_db_properties`). `_filter_optional(props)` strips absent optional fields from every write payload. Schema is loaded once at startup; a restart is required to detect newly added columns.
+- `OPTIONAL_TASK_FIELDS` constant in `recurring_tasks.py` defines the set. Adding a field to this set makes it optional without any other code changes.
+
 ---
 
-## 11. Open Questions (pending)
-
-Numbering matches the user's design notes. Resolved items are in the Decision Log (§10), not here.
-
-### Group 2 — Designed but not implemented
-
-*(All Group 2 questions resolved — see Decision Log.)*
-
-*(Groups 3 and 4 fully resolved — see Decision Log.)*
-
-### Discovered during design session
-
-| ID | Question | Depends on |
-|---|---|---|
-*(All discovered questions resolved — see Decision Log.)*
-
----
-
-## 12. Ideas Parking Lot
-
-Rough ideas that are not yet designed or committed to. Nothing here is planned — it's a holding area so ideas aren't lost.
-
----
-
-### Timer / Mission Tracking
-
-**One-liner:** Tie closed tasks to "mission" areas and surface how much effort went into each one over time.
-
-**Context:** The user maintains a set of high-level missions/workbench areas in Notion (e.g. ADHD Medication, Art Chatbot Coding Project, Improv Comedy Journey, Game Dev Journaling, Job Search). These live outside the main task list and contain their own notes and details. The idea is to aggregate closed tasks during a period and attribute them to a mission — even loosely, not necessarily via a strict task-to-mission relation. Goals: track effort per mission, surface which tasks contributed, optionally estimate how long things took. Intentionally abstract and lightweight — not a time-tracking tool, more of an effort heatmap.
-
-**Open questions:** How are tasks attributed to a mission (explicit relation, tag, keyword match)? What does a "timer" look like in Notion — a duration field, a count, a rollup? How does effort estimation work without logged time? Is this read-only reporting or does the bot write anything back?

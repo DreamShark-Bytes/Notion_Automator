@@ -18,6 +18,8 @@ from bot_notes import (
     add_bot_note,
     mark_page_examined,
     RTD_AT_MOST_N_REACHED,
+    RTD_EXACTLY_N_EXCEEDED,
+    RTD_INVALID_ANCHOR_TIME,
 )
 
 if TYPE_CHECKING:
@@ -31,11 +33,19 @@ logger = logging.getLogger(__name__)
 
 _definitions_db_id: str | None = None
 _tasks_db_id: str | None = None
+_task_db_properties: set[str] = set()  # populated lazily on first governance/automation run
 
 # Sentinel key used by auto_recurring_tasks to return newly created pages
 # back through the automation protocol so daemon.py can add them to the snapshot.
 # run_automations_on_page strips this key before calling update_page_properties.
 BOT_CREATED_PAGES_KEY = "__bot_created_pages__"
+
+# Fields the user may omit from their task database. Writes to absent fields are silently skipped.
+OPTIONAL_TASK_FIELDS = {
+    "Period Key (Recurring Task)",
+    "Occurrence # this Period (Recurring Task)",
+    "Period Target (Recurring Task)",
+}
 
 
 def init(definitions_db_id: str, tasks_db_id: str) -> None:
@@ -43,6 +53,34 @@ def init(definitions_db_id: str, tasks_db_id: str) -> None:
     global _definitions_db_id, _tasks_db_id
     _definitions_db_id = definitions_db_id
     _tasks_db_id = tasks_db_id
+
+
+def _load_task_db_schema(client: "NotionClient") -> None:
+    """Query the task database schema once and cache the property names.
+
+    Called lazily on the first governance/automation run. Subsequent calls are no-ops.
+    If the query fails, optional fields are written unconditionally (safe fallback).
+    """
+    global _task_db_properties
+    if _task_db_properties or not _tasks_db_id:
+        return
+    try:
+        db = client.get_database(_tasks_db_id)
+        _task_db_properties = set(db.get("properties", {}).keys())
+        logger.info(f"Task DB schema loaded: {len(_task_db_properties)} properties found.")
+    except Exception as e:
+        logger.warning(f"Could not load task DB schema — optional fields written unconditionally: {e}")
+
+
+def _filter_optional(props: dict) -> dict:
+    """Remove optional task fields not present in the task database schema.
+
+    Required fields always pass through. If the schema hasn't been loaded yet,
+    all fields pass through (safe fallback — avoids masking bugs on first run).
+    """
+    if not _task_db_properties:
+        return props
+    return {k: v for k, v in props.items() if k not in OPTIONAL_TASK_FIELDS or k in _task_db_properties}
 
 
 # ------------------------------------------------------------------ #
@@ -56,7 +94,7 @@ FIELDS_NOT_INHERITED = {
     "Due Date Update Count",
     "Due Date",
     "Status",
-    "Instance # (Recurring Task)",
+    "Occurrence # this Period (Recurring Task)",
     "Period Key (Recurring Task)",
     "Period Target (Recurring Task)",
     "Ignore Grace Period (Recurring Task)",
@@ -75,7 +113,7 @@ PERIOD_CAP_DAYS = 1
 # Compared after lowercasing and stripping all non-letter characters, so
 # "Cancelled", "cancelled", "canceled", and "Canceled" all match "cancelled"/"canceled".
 NON_COMPLETION_STATUSES: frozenset[str] = frozenset({
-    "cancelled", "canceled",
+    "cancelled", "canceled", 
     "skipped", "missed",
     "ignored", "abandoned",
     "destroyed", "disintegrated", "vaporized", "yeeted", "evaporated","banished"
@@ -225,8 +263,6 @@ def _period_dates(period: str, anchor_day: int | None, use_next: bool, now: date
             days_ahead = target_weekday - now.weekday()
             if use_next and days_ahead <= 0:
                 days_ahead += 7
-            elif not use_next and days_ahead < 0:
-                days_ahead += 7
             target = now + timedelta(days=days_ahead)
             return target.replace(hour=0, minute=0, second=0, microsecond=0), None
         else:
@@ -273,6 +309,7 @@ def _calc_due_date(
     anchor_time: str | None,
     use_next_period: bool,
     task_type: str | None = None,
+    def_id: str | None = None,
 ) -> dict | None:
     """Return a Notion date property dict for the new task's Due Date, or None."""
     if cadence_type in ("Unlimited", "At most N per period") or not period:
@@ -291,15 +328,29 @@ def _calc_due_date(
             return {"date": {"start": dt.isoformat(), "end": None}}
         except Exception:
             logger.warning(f"Could not parse anchor_time '{anchor_time}' — falling back to date only.")
+            if def_id:
+                add_bot_note(def_id, RTD_INVALID_ANCHOR_TIME,
+                             f"Anchor Time '{anchor_time}' could not be parsed (expected HH:MM). Due Date set to date only.")
             return {"date": {"start": target.strftime("%Y-%m-%d"), "end": None}}
 
     if anchor_day and not anchor_time:
         return {"date": {"start": target.strftime("%Y-%m-%d"), "end": None}}
 
-    # No anchor — full period span
-    if end:
-        return {"date": {"start": target.strftime("%Y-%m-%d"), "end": end.strftime("%Y-%m-%d")}}
-    return {"date": {"start": target.strftime("%Y-%m-%d"), "end": None}}
+    # No anchor day — use end of period as due date (avoids spanning the full period on calendar).
+    # Day period has no end (end=None), so fall back to target (today/tomorrow).
+    end_date = end if end is not None else target
+    if anchor_time:
+        # Anchor time with no anchor day: apply time to end-of-period date.
+        try:
+            hour, minute = (int(p) for p in anchor_time.strip().split(":"))
+            dt = end_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            return {"date": {"start": dt.isoformat(), "end": None}}
+        except Exception:
+            logger.warning(f"Could not parse anchor_time '{anchor_time}' — falling back to date only.")
+            if def_id:
+                add_bot_note(def_id, RTD_INVALID_ANCHOR_TIME,
+                             f"Anchor Time '{anchor_time}' could not be parsed (expected HH:MM). Due Date set to date only.")
+    return {"date": {"start": end_date.strftime("%Y-%m-%d"), "end": None}}
 
 
 # ------------------------------------------------------------------ #
@@ -386,10 +437,12 @@ def _task_in_period(
 ) -> bool:
     """Return True if a task belongs to the current period.
 
-    Closed tasks: determined by Closed Date (ground truth). Period Key field
-    is ignored once a task is closed — it remains as a human-readable label
-    in Notion but has no effect on bot logic.
-    Open tasks:   determined by Period Key field (no Closed Date available).
+    Closed tasks: determined by Closed Date (ground truth). auto_closed_date governance
+    backfills last_edited_time as Closed Date for any Complete task missing it, so this
+    field is always populated before this function is called. The Period Key field is
+    never read — it is a display-only label.
+    Open tasks:   determined by Due Date. Falls back to now() if Due Date is absent —
+    an open task with no Due Date always counts as belonging to the current period.
 
     Auto-cancelled tasks are correctly attributed to their due period because
     governance stamps Closed Date = min(_period_end(period, due), yesterday 23:59),
@@ -408,7 +461,14 @@ def _task_in_period(
         if dt and period:
             return _period_key(period, dt) == current_period_key
         return False
-    return _get_text(task, "Period Key (Recurring Task)") == current_period_key
+    # Open task (no Closed Date): use Due Date; fall back to now.
+    # Closed tasks always have Closed Date set by auto_closed_date governance before this runs.
+    due_str = _get_date(task, "Due Date")
+    now = datetime.now().astimezone()
+    if period:
+        pk_dt = (_parse_closed_dt(due_str) if due_str else None) or now
+        return _period_key(period, pk_dt) == current_period_key
+    return False
 
 
 def _count_tasks_in_period(
@@ -602,7 +662,7 @@ def _create_next_task(
                 pk_dt = _parse_closed_dt(t_due) or now
                 t_pk = _period_key(period, pk_dt)
             else:
-                t_pk = _get_text(t, "Period Key (Recurring Task)")
+                t_pk = _period_key(period, now) if period else ""
             if t_pk == target_period_key:
                 logger.info(
                     f"Skipping task creation for definition {definition_id}: "
@@ -622,7 +682,7 @@ def _create_next_task(
     props["Name"] = {"title": [{"type": "text", "text": {"content": def_name}}]}
 
     props["Recurring Series"] = {"relation": [{"id": definition_id}]}
-    props["Instance # (Recurring Task)"] = {"number": new_instance}
+    props["Occurrence # this Period (Recurring Task)"] = {"number": new_instance}
 
     if target_period_key:
         props["Period Key (Recurring Task)"] = {"rich_text": [{"type": "text", "text": {"content": target_period_key}}]}
@@ -631,7 +691,7 @@ def _create_next_task(
     if period_target:
         props["Period Target (Recurring Task)"] = {"rich_text": [{"type": "text", "text": {"content": period_target}}]}
 
-    due_date = _calc_due_date(cadence_type, period, anchor_day, anchor_time, use_next_period, task_type)
+    due_date = _calc_due_date(cadence_type, period, anchor_day, anchor_time, use_next_period, task_type, def_id=definition_id)
     if due_date:
         props["Due Date"] = due_date
 
@@ -646,7 +706,7 @@ def _create_next_task(
         return
 
     try:
-        new_page = client.create_page(db_id, props)
+        new_page = client.create_page(db_id, _filter_optional(props))
         logger.info(f"Created recurring task for definition {definition_id}, instance #{new_instance}.")
         return new_page
     except Exception as e:
@@ -658,7 +718,7 @@ def _create_next_task(
 #  Startup governance
 # ------------------------------------------------------------------ #
 
-def run_recurring_governance(client: "NotionClient") -> None:
+def run_recurring_governance(client: "NotionClient") -> list[dict]:
     """
     Governance pass for recurring task definitions.
 
@@ -669,11 +729,23 @@ def run_recurring_governance(client: "NotionClient") -> None:
       - Corrects Period Key and Instance # drift on every open task.
       - Auto-cancels overdue Responsibility tasks (past grace period or period cap).
       - Alerts on At-most-N cap breaches.
+
+    Returns a list of pages created during this governance pass so that daemon.py
+    can run an automations init pass on them immediately (populating fields like
+    Reopen Count and Due Date Update Count that are only written during init).
     """
     if not _definitions_db_id or not _tasks_db_id:
-        return
+        return []
 
+    _load_task_db_schema(client)
+    if _task_db_properties and "Closed Date" not in _task_db_properties:
+        logger.error(
+            "CRITICAL: 'Closed Date' column not found in the task database. "
+            "Recurring task period logic (occurrence counting, auto-cancel, period detection) "
+            "requires this field — results will be incorrect until the column is added."
+        )
     logger.info("Running recurring task governance ...")
+    created_pages: list[dict] = []
 
     try:
         definitions = client.query_database(
@@ -710,12 +782,20 @@ def run_recurring_governance(client: "NotionClient") -> None:
         def_id = definition["id"]
         def_name = _get_title(definition)
         cadence_type = _get_select(definition, "Cadence Type")
-        if cadence_type == "N per period":  # legacy name, normalized to current name
-            cadence_type = "Exactly N per period"
         cadence_n = _get_number(definition, "Cadence N")
         period = _get_select(definition, "Period")
         current_period_key = _period_key(period, now) if period else None
         open_tasks = open_tasks_by_def.get(def_id, [])
+        anchor_time = _get_text(definition, "Anchor Time")
+
+        # --- Anchor Time validation ---
+        # Runs for every RTD so the note appears/clears regardless of whether a task is created.
+        if anchor_time:
+            try:
+                _h, _m = (int(p) for p in anchor_time.strip().split(":"))
+            except Exception:
+                add_bot_note(def_id, RTD_INVALID_ANCHOR_TIME,
+                             f"Anchor Time '{anchor_time}' could not be parsed (expected HH:MM). Due Date set to date only.")
 
         # --- Grace period: auto-cancel overdue Responsibility tasks ---
         # Runs before the 0/multiple-open check so cancelled tasks don't count.
@@ -736,10 +816,18 @@ def run_recurring_governance(client: "NotionClient") -> None:
                     due = _get_due_end_or_start(task)
                     if not due:
                         continue
-                    task_pk = _get_text(task, "Period Key (Recurring Task)")
-                    # A task is stale only if its Period Key is BEFORE the current period
-                    # (lexicographic comparison works for all period key formats).
-                    # Tasks with a FUTURE period key are pre-created and must not be cancelled.
+                    # Derive expected period from Due Date (ground truth).
+                    # Open tasks with no Due Date fall back to now → current period → never stale.
+                    # Tasks with no period definition cannot have staleness determined.
+                    # The stored Period Key field is never read here — it may be corrupted.
+                    if period:
+                        due_str = _get_date(task, "Due Date")
+                        pk_dt = (_parse_closed_dt(due_str) if due_str else None) or now
+                        task_pk = _period_key(period, pk_dt)
+                    else:
+                        task_pk = None  # no period defined — cannot determine staleness
+                    # A task is stale only if its period is BEFORE the current period.
+                    # Tasks in a FUTURE period are pre-created and must not be cancelled.
                     stale = task_pk is not None and current_period_key is not None and task_pk < current_period_key
                     if _is_overdue_by(due, grace) or (stale and past_cap):
                         reason = "grace period expired" if _is_overdue_by(due, grace) else "period cap (stale task in new period)"
@@ -769,11 +857,9 @@ def run_recurring_governance(client: "NotionClient") -> None:
         # We only create a new task when NO open task covers the current period.
         if current_period_key:
             has_current_period_task = any(
-                (_period_key(period, _parse_closed_dt(_get_date(t, "Due Date")) or now) == current_period_key
-                 if (_get_date(t, "Due Date") and period)
-                 else _get_text(t, "Period Key (Recurring Task)") == current_period_key)
+                _period_key(period, _parse_closed_dt(_get_date(t, "Due Date")) or now) == current_period_key
                 for t in remaining_open
-            )
+            ) if period else bool(remaining_open)
         else:
             # No period defined — any open task counts.
             has_current_period_task = bool(remaining_open)
@@ -806,7 +892,9 @@ def run_recurring_governance(client: "NotionClient") -> None:
                             f"{count_all} completion(s) — targeting next period."
                         )
             logger.info(f"Recurring governance: no open task for '{def_name}' in current period — creating one.")
-            _create_next_task(client, None, definition, force_next_period=force_next)
+            new_page = _create_next_task(client, None, definition, force_next_period=force_next)
+            if new_page:
+                created_pages.append(new_page)
 
         # --- Correct Period Key and Instance # on every open task ---
         # Group open tasks by their expected Period Key (derived from Due Date when
@@ -848,8 +936,8 @@ def run_recurring_governance(client: "NotionClient") -> None:
 
             for i, task in enumerate(ordered):
                 expected_instance = count - i
-                current_instance = _get_number(task, "Instance # (Recurring Task)")
-                current_pk = _get_text(task, "Period Key (Recurring Task)")
+                current_instance = _get_number(task, "Occurrence # this Period (Recurring Task)")
+                current_pk = (_get_text(task, "Period Key (Recurring Task)") or "").strip() or None
 
                 drift_updates: dict = {}
 
@@ -867,11 +955,11 @@ def run_recurring_governance(client: "NotionClient") -> None:
                         f"Governance: correcting Instance # on {task['id']} for '{def_name}': "
                         f"{current_instance} → {expected_instance}"
                     )
-                    drift_updates["Instance # (Recurring Task)"] = {"number": expected_instance}
+                    drift_updates["Occurrence # this Period (Recurring Task)"] = {"number": expected_instance}
 
                 if drift_updates:
                     try:
-                        client.update_page_properties(task["id"], drift_updates)
+                        client.update_page_properties(task["id"], _filter_optional(drift_updates))
                     except Exception as e:
                         logger.error(f"Failed to correct open task {task['id']}: {e}")
 
@@ -887,7 +975,24 @@ def run_recurring_governance(client: "NotionClient") -> None:
                 )
                 logger.info(f"At-most-N cap exceeded for '{def_name}': {count}/{int(cadence_n)}")
 
+        # --- Exactly N alert (completions exceeded N — unexpected; force_next should prevent this) ---
+        if cadence_type == "Exactly N per period" and cadence_n is not None and current_period_key:
+            completion_count = sum(
+                1 for t in all_tasks
+                if def_id in _get_relation_ids(t, "Recurring Series")
+                and _task_in_period(t, period, current_period_key)
+            )
+            if completion_count > int(cadence_n):
+                add_bot_note(
+                    def_id,
+                    RTD_EXACTLY_N_EXCEEDED,
+                    f"'Exactly N per period' target of {int(cadence_n)} exceeded "
+                    f"({completion_count} completion(s) this period). Manual cleanup may be needed.",
+                )
+                logger.info(f"Exactly-N exceeded for '{def_name}': {completion_count}/{int(cadence_n)}")
+
     logger.info("Recurring task governance complete.")
+    return created_pages
 
 
 # ------------------------------------------------------------------ #
@@ -904,6 +1009,8 @@ def auto_recurring_tasks(client: "NotionClient", page: dict, prev_page: dict | N
     """
     if not _definitions_db_id:
         return {}
+
+    _load_task_db_schema(client)
 
     series_ids = _get_relation_ids(page, "Recurring Series")
     if not series_ids:
@@ -934,13 +1041,12 @@ def auto_recurring_tasks(client: "NotionClient", page: dict, prev_page: dict | N
         created = [new_page] if new_page is not None else []
         return {BOT_CREATED_PAGES_KEY: created}
 
-    # Initialization: task is linked to a series but has never been initialized by the bot
-    # (Period Key and Instance # are both unset — happens when a task is manually created
-    # and linked to a series, or when governance creates a task but fields weren't stamped)
+    # Initialization: task is linked to a series but Occurrence # has never been stamped.
+    # Happens when a task is manually created and linked to a series, or when governance
+    # creates a task but fields weren't stamped yet.
     if current_group != "Complete":
-        period_key = _get_text(page, "Period Key (Recurring Task)")
-        instance_num = _get_number(page, "Instance # (Recurring Task)")
-        if period_key is None and instance_num is None:
+        instance_num = _get_number(page, "Occurrence # this Period (Recurring Task)")
+        if instance_num is None:
             period = _get_select(definition, "Period")
             cadence_type = _get_select(definition, "Cadence Type")
             if cadence_type == "N per period":  # legacy name, normalized to current name
@@ -964,7 +1070,7 @@ def auto_recurring_tasks(client: "NotionClient", page: dict, prev_page: dict | N
 
             task_type = _get_select(definition, "Type")
             count = _count_tasks_in_period(client, definition["id"], period, current_pk)
-            updates: dict = {"Instance # (Recurring Task)": {"number": count + 1}}
+            updates: dict = {"Occurrence # this Period (Recurring Task)": {"number": count + 1}}
             if current_pk:
                 updates["Period Key (Recurring Task)"] = {"rich_text": [{"type": "text", "text": {"content": current_pk}}]}
 
@@ -973,23 +1079,22 @@ def auto_recurring_tasks(client: "NotionClient", page: dict, prev_page: dict | N
                 updates["Period Target (Recurring Task)"] = {"rich_text": [{"type": "text", "text": {"content": period_target}}]}
 
             if not existing_due:
-                due_date = _calc_due_date(cadence_type, period, anchor_day, anchor_time, use_next_period=False, task_type=task_type)
+                due_date = _calc_due_date(cadence_type, period, anchor_day, anchor_time, use_next_period=False, task_type=task_type, def_id=definition["id"])
                 if due_date:
                     updates["Due Date"] = due_date
 
+            updates = _filter_optional(updates)
             logger.info(f"Initializing uninitialized recurring task {page['id']}: {list(updates.keys())}")
             return updates
 
         # Task is already initialized — sync Period Target in case RTD Cadence Type changed.
         period = _get_select(definition, "Period")
         cadence_type = _get_select(definition, "Cadence Type")
-        if cadence_type == "N per period":  # legacy name, normalized to current name
-            cadence_type = "Exactly N per period"
         cadence_n = _get_number(definition, "Cadence N")
         expected_target = _build_period_target(cadence_type, cadence_n, period)
         current_target = _get_text(page, "Period Target (Recurring Task)")
         if expected_target and expected_target != current_target:
             logger.info(f"Syncing Period Target on {page['id']}: {current_target!r} → {expected_target!r}")
-            return {"Period Target (Recurring Task)": {"rich_text": [{"type": "text", "text": {"content": expected_target}}]}}
+            return _filter_optional({"Period Target (Recurring Task)": {"rich_text": [{"type": "text", "text": {"content": expected_target}}]}})
 
     return {}
