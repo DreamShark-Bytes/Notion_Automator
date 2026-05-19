@@ -6,7 +6,7 @@ _Last updated: May 18, 2026_
 | ---------| --------------------------------------------------------------------| ---------|
 | A1      | Close triggers next task (Unlimited)                               | [P]     |
 | A2      | Close triggers next task in next period (Once per period)          | [P]     |
-| A3      | Inactive RTD — no new task                                         | [P]     |
+| A3      | Inactive RTD (Status ≠ Active) — no new task                       | [ ]     |
 | A4      | Task not linked to RTD — no action                                 | [P]     |
 | A4b     | No duplicate if target period already has open task                | [P]     |
 | A5      | Manually created task with missing bot fields gets initialized     | [P]     |
@@ -44,15 +44,15 @@ _Last updated: May 18, 2026_
 | **H7**  | Same as H6 with different date scenario                            | **[P]** |
 | **I6**  | Optional task fields absent → bot skips writes without crashing    | **[P]** |
 | I7      | Optional fields added mid-session require restart to write to them | [P]     |
-| **I8**  | `closed_date` flag absent → no Closed Date stamped, no 400 errors  | **[ ]** |
-| **I9**  | `reopen_count` absent → Closed Date still works, count not written  | **[ ]** |
-| **I10** | `due_date_tracking` absent → count/first-date never written        | **[ ]** |
-| **I11** | Recurring tasks + Closed Date column absent → CRITICAL logged      | **[ ]** |
+| **I8**  | `closed_date` flag absent → no Closed Date stamped, no 400 errors  | **[P]** |
+| **I9**  | `reopen_count` absent → Closed Date still works, count not written | **[P]** |
+| **I10** | `due_date_tracking` absent → count/first-date never written        | **[P]** |
+| **I11** | Recurring tasks + Closed Date column absent → CRITICAL logged      | **[P]** |
 | I1      | RTD page deleted mid-run — daemon continues without crash          | [S]     |
 | I2      | Notion API error during task creation                              | [S]     |
 | **I3**  | Task linked to multiple RTDs — graceful handling                   | **[S]** |
 | I4–I5   | First-sight init, unchanged-page skip                              | [S]     |
-| **Z1**  | New active RTD creates task within one poll cycle (no restart)     | **[ ]** |
+| **Z1**  | New/activated RTD creates task within one poll cycle (no restart)  | **[P]** |
 
 ---
 
@@ -69,14 +69,26 @@ _Last updated: May 18, 2026_
 ## Priorities
 _Ordered by importance. Deploy is gated on items 1–3._
 
-1. **Run I8–I11** — verify config-gated automation flags (no 400 errors, correct behavior when flags absent)
-2. **Implement + test Z1** — RTD monitoring: new/activated RTDs create a task within one poll cycle. Design and plan already complete; implementation is in `daemon.py` only.
-3. **Deploy** — rename "N per period" Notion option, update `config.toml`, ship.
-4. **Project Page** — Notion page as daemon home base: auto-creates child databases, Notion-based config (eventually replaces `config.toml` automation flags), status dashboard. Requires `create_database()` in `notion_api.py`. Unblocks Notifications.
-5. **RTD Series State (Habit Lifecycle)** — Replace Active checkbox with a Status field (Planned / Active / On Hold / Completed / Retired / Abandoned). Requires RTD monitoring (Z1) for real-time activation response.
-6. **Notifications** — Discord/Telegram webhooks via `notifiers.py`. Depends on Project Page for URL config.
-7. **Change Tracking** — Opt-in field change log (old/new value, page ID, timestamp). Storage format TBD. Feeds Notion_PowerBI.
-8. **Timer / Mission Tracking** — Link closed tasks to mission areas for effort heatmap. Attribution method not yet decided — see PLANNED.md.
+1. **RTD Series State (Habit Lifecycle)** — Replace Active checkbox with a Status field. `[Done]`
+2. **Implement + test Z1** — RTD monitoring: new/activated RTDs create a task within one poll cycle. `[Done]`
+3. **Deploy** — rename "N per period" Notion option, rename "Cadence N" → "N Cadence", update `config.toml`, ship.
+4. **Pivot to Notion_PowerBI** — learn Notion_PowerBI before continuing here. Recurring Tasks is stable without the items below.
+5. **Project Page** — Notion page as daemon home base: auto-creates child databases, Notion-based config (eventually replaces `config.toml` automation flags), status dashboard. Requires `create_database()` in `notion_api.py`. Unblocks Notifications.
+6. **Change Tracking** — Opt-in field change log (old/new value, page ID, timestamp). Storage format TBD. Feeds Notion_PowerBI.
+7. **Timer / Mission Tracking** — Link closed tasks to mission areas for effort heatmap. Attribution method not yet decided — see PLANNED.md.
+8. **Notifications** — Discord/Telegram webhooks via `notifiers.py`. Depends on Project Page for URL config.
+9. **Clear Blocking/Blocked-By on Close** — When a task closes, clear both relation fields. Two-way synced relation means one write may be enough; confirm field names before implementing — see PLANNED.md.
+10. **First Value Field Tracking** — Stamp `First [Field Name]` column with first observed value for any configured field — see PLANNED.md.
+11. **Automated Testing** — Unit tests for pure logic functions (`_period_dates`, `_period_key`, `_calc_due_date`). Defer until feature set stabilizes — see PLANNED.md.
+
+---
+
+## Open Issues
+_Things to file in the repository issue tracker._
+
+- **timeout tuple** — `timeout=30` in notion_api.py could be `timeout=(10, 30)` (connect vs. read) for more precision; POST/PATCH timeout carries a silent-success risk if Notion processed the write but the response never arrived
+- **Skipped tests** — E1–E4, F3–F4, I1–I5, I3 are marked [S]; decide which are worth automating or at least documenting as known gaps
+- **`database_ids` removal** — no backward-compatible warning; old config silently errors; could log a helpful message pointing to config_example.toml
 
 ---
 

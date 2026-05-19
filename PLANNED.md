@@ -151,6 +151,67 @@ fields = ["Status", "Due Date", "Assignee"]  # opt-in list
 
 ---
 
+## Clear Blocking/Blocked-By on Close
+
+**Status:** Ready to implement
+**One-liner:** When a task is closed (moves to Done group), clear its "Blocking" and "Blocked By" relation fields so completed tasks don't appear as active blockers.
+
+### Decisions made
+
+- Clear both "Blocking" and "Blocked By" on close.
+- If the relation is two-way synced in Notion (standard setup), clearing "Blocking" is sufficient — Notion automatically clears the corresponding "Blocked By" entries on the other tasks. Clearing both defensively is still fine and covers the one-way case.
+- No historical preservation of the blocking relationship in this feature. Historical relation changes are covered by Change Tracking (relational fields are eligible for opt-in tracking there).
+- Trigger: same Done-group transition check used by `auto_closed_date`. No new transition detection needed.
+
+### Open questions
+- What are the exact Notion property names for these two fields? Need to confirm before implementation.
+
+### Dependencies
+- None. Standalone automation function, no dependency on other planned features.
+
+---
+
+## First Value Field Tracking
+
+**Status:** Pre-design (decisions largely made — ready for implementation planning)
+**One-liner:** For any configured field, automatically stamp a `First [Field Name]` column with the field's first observed value — never updated after the initial write.
+
+### Decisions made
+
+- **Naming convention:** `First [Field Name]` — bot looks for a matching column by convention. User creates `First Due Date` and the bot auto-associates it with `Due Date`. No explicit field mapping in config.
+- **Config:** replaces `due_date_tracking` with two independent flags:
+  ```toml
+  [[databases]]
+  due_date_update_count = true          # existing counter behavior
+  first_value_fields    = ["Due Date", "Status"]   # new — list of fields to track
+  ```
+  Bot looks for `First Due Date`, `First Status`, etc. in the database schema. Missing columns are skipped silently.
+- **Breaking change:** `due_date_tracking = true` is replaced. Existing users must update `config.toml`. Add to deploy prerequisites when this ships.
+- **Type support:**
+
+  | Type | Supported | Notes |
+  |---|---|---|
+  | `date` | Yes | native date field |
+  | `number` | Yes | native number field |
+  | `select` | Yes | store option name as text |
+  | `status` | Yes | store option name as text (no group — group is inferable from option name) |
+  | `text` | Yes | native text field |
+  | `url` / `email` / `phone` | Yes | store as text |
+  | `checkbox` | **No** | default `false` is indistinguishable from untouched |
+  | `multi_select` | **No** | too complex for v1 |
+  | `rich_text` / `files` / `relation` / `formula` / `rollup` / `people` | **No** | excluded |
+
+- **Write-once:** once `First [Field]` is stamped, the bot never overwrites it. If the user manually clears it, the bot re-stamps on the next poll (same as First Due Date today).
+- **Does not increment any counter.** Purely a snapshot of the first observed value.
+
+### Open questions
+- None — ready for implementation planning.
+
+### Dependencies
+- `_db_configs` registry already in place. Config flag rename is the only breaking change.
+
+---
+
 ## Timer / Mission Tracking
 
 **Status:** Pre-design (early — major open questions remain)
@@ -169,3 +230,27 @@ The user maintains high-level mission/workbench areas in Notion. Each mission ha
 - Needs attribution method decision before any design can happen.
 - If bot-writes-back: depends on Project Page for configuration.
 - If reporting-only: may belong entirely in Notion_PowerBI, not here.
+
+---
+
+## Automated Testing
+
+**Status:** Pre-design (deferred — add after feature set stabilizes)
+**One-liner:** Unit tests for pure logic functions that have caused the most bugs — no mocking needed, no Notion API dependency.
+
+### Decisions made
+- Defer until design settles. Most bugs have been in edge cases that manual testing catches well; a test suite written mid-churn would need constant rewriting.
+- Scope: pure logic functions only. Automation functions require mocked pages and a mocked client — high scaffolding cost for a personal project.
+
+### Priority targets (highest bug history)
+- `_period_dates` — weekly anchor-day off-by-week bug (Z17) would have been caught
+- `_period_key` — period boundary edge cases
+- `_calc_due_date` — end-of-period, anchor day, monthly/weekly math
+
+### What NOT to test (yet)
+- Automation functions (`auto_closed_date`, `auto_recurring_tasks`, etc.) — require mocked Notion API and fabricated page dicts; high scaffolding cost
+- Governance functions — require live or deeply mocked Notion state
+- Integration tests — require a real Notion workspace; better handled by the existing manual test plan
+
+### Dependencies
+- Feature set should be stable before investing in tests. Revisit after PowerBI pivot.

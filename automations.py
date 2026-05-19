@@ -42,12 +42,12 @@ _db_configs: dict[str, dict] = {}  # database_id → [[databases]] config entry
 
 def register_db(db_id: str, cfg: dict) -> None:
     """Register a database's automation config. Called once per database at daemon startup."""
-    _db_configs[db_id] = cfg
+    _db_configs[db_id.replace("-", "")] = cfg
 
 
 def _flags(page: dict) -> dict:
     """Return the automation flags for the database this page belongs to."""
-    db_id = page.get("parent", {}).get("database_id", "")
+    db_id = page.get("parent", {}).get("database_id", "").replace("-", "")
     return _db_configs.get(db_id, {})
 
 

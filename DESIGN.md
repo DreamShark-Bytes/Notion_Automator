@@ -773,5 +773,18 @@ Resolved design decisions. Each entry states the rule and the reason so future c
 - Implementation: on first governance or automation run, the bot queries the task database schema via `GET /v1/databases/{id}` and caches the property set for the session (`_task_db_properties`). `_filter_optional(props)` strips absent optional fields from every write payload. Schema is loaded once at startup; a restart is required to detect newly added columns.
 - `OPTIONAL_TASK_FIELDS` constant in `recurring_tasks.py` defines the set. Adding a field to this set makes it optional without any other code changes.
 
+**[RTD Series State] The `Active` checkbox on RTD pages is replaced by a `Status` field.**
+- Bot logic checks `Status == "Active"` only. Group membership (To-do / In Progress / Done) is irrelevant to the bot — new statuses added in Notion are safe by default (ignored unless explicitly coded).
+- Governance queries only Active RTDs via Notion API filter: `{"property": "Status", "status": {"equals": "Active"}}`.
+- `auto_recurring_tasks` checks the fetched definition's Status value before creating a next task on close.
+- Constants: `RTD_STATUS_FIELD = "Status"`, `RTD_ACTIVE_STATUS = "Active"` in `recurring_tasks.py`.
+- No destructive action on open tasks when an RTD goes inactive — least-destructive-intervention principle. Open tasks remain; user closes them when ready.
+
+**[RTD Monitoring / Z1] The RTD database is polled in the main loop for change detection.**
+- Problem: governance only ran at startup and 2am. A new RTD or an RTD toggled to Active mid-session got no task until the next governance pass.
+- Fix: `_poll_rtd_for_changes()` runs each loop iteration (same interval as task DB polls). Any detected change triggers `run_governance()` immediately. Governance already handles all cases correctly — no changes to `recurring_tasks.py`.
+- After governance fires (whether from RTD change or 2am cron), the RTD snapshot is fully refreshed from the API. This ensures bot-written Bot Notes become the new baseline and do not re-trigger governance on the next poll.
+- `rt_defs_id` is hoisted to function scope so the poll loop can access it regardless of whether recurring tasks were fully initialized.
+
 ---
 

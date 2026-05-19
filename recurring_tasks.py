@@ -107,6 +107,10 @@ FIELDS_NOT_INHERITED = {
 # Increase to give more buffer before cancellation fires.
 PERIOD_CAP_DAYS = 1
 
+# RTD Status field — replaces the Active checkbox. Only RTDs with this status create tasks.
+RTD_STATUS_FIELD  = "Status"
+RTD_ACTIVE_STATUS = "Active"
+
 # Statuses in the Complete group that do NOT count as completions.
 # Tasks with these statuses are treated as "skipped/missed" by governance —
 # they do not advance Instance # or trigger force_next.
@@ -593,7 +597,7 @@ def _create_next_task(
     anchor_day_raw = _get_number(definition, "Anchor Day")
     anchor_day = int(anchor_day_raw) if anchor_day_raw is not None else None
     anchor_time = _get_text(definition, "Anchor Time")
-    cadence_n = _get_number(definition, "Cadence N")
+    cadence_n = _get_number(definition, "N Cadence")
     definition_id = definition["id"]
 
     now = datetime.now().astimezone()
@@ -750,7 +754,7 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
     try:
         definitions = client.query_database(
             _definitions_db_id,
-            filter_payload={"property": "Active", "checkbox": {"equals": True}},
+            filter_payload={"property": RTD_STATUS_FIELD, "status": {"equals": RTD_ACTIVE_STATUS}},
         )
     except Exception as e:
         logger.error(f"Failed to fetch recurring definitions: {e}")
@@ -782,7 +786,7 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
         def_id = definition["id"]
         def_name = _get_title(definition)
         cadence_type = _get_select(definition, "Cadence Type")
-        cadence_n = _get_number(definition, "Cadence N")
+        cadence_n = _get_number(definition, "N Cadence")
         period = _get_select(definition, "Period")
         current_period_key = _period_key(period, now) if period else None
         open_tasks = open_tasks_by_def.get(def_id, [])
@@ -1022,7 +1026,8 @@ def auto_recurring_tasks(client: "NotionClient", page: dict, prev_page: dict | N
         logger.error(f"Could not fetch recurring definition {series_ids[0]}: {e}")
         return {}
 
-    if not definition.get("properties", {}).get("Active", {}).get("checkbox"):
+    rtd_status = definition.get("properties", {}).get(RTD_STATUS_FIELD, {}).get("status", {}).get("name", "")
+    if rtd_status != RTD_ACTIVE_STATUS:
         return {}
 
     current_group = _get_status_group(client, page, "Status")
@@ -1051,7 +1056,7 @@ def auto_recurring_tasks(client: "NotionClient", page: dict, prev_page: dict | N
             cadence_type = _get_select(definition, "Cadence Type")
             if cadence_type == "N per period":  # legacy name, normalized to current name
                 cadence_type = "Exactly N per period"
-            cadence_n = _get_number(definition, "Cadence N")
+            cadence_n = _get_number(definition, "N Cadence")
             anchor_day_raw = _get_number(definition, "Anchor Day")
             anchor_day = int(anchor_day_raw) if anchor_day_raw is not None else None
             anchor_time = _get_text(definition, "Anchor Time")
@@ -1090,7 +1095,7 @@ def auto_recurring_tasks(client: "NotionClient", page: dict, prev_page: dict | N
         # Task is already initialized — sync Period Target in case RTD Cadence Type changed.
         period = _get_select(definition, "Period")
         cadence_type = _get_select(definition, "Cadence Type")
-        cadence_n = _get_number(definition, "Cadence N")
+        cadence_n = _get_number(definition, "N Cadence")
         expected_target = _build_period_target(cadence_type, cadence_n, period)
         current_target = _get_text(page, "Period Target (Recurring Task)")
         if expected_target and expected_target != current_target:

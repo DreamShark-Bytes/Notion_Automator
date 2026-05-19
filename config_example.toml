@@ -4,6 +4,9 @@
 # Your Notion integration token (Settings → Integrations → New integration)
 token = "ntn_your_token_here"
 
+# Seconds between polls (applies to all databases)
+poll_interval = 60
+
 # Task databases to watch. Each [[databases]] block is one database.
 # Flags control which automations are active for that database (absent = disabled).
 [[databases]]
@@ -13,9 +16,6 @@ reopen_count      = true   # increment Reopen Count on reopen (requires closed_d
 due_date_tracking = true   # track Due Date Update Count and First Due Date
 
 # Add more [[databases]] blocks for additional task databases.
-
-# Seconds between polls
-poll_interval = 60
 
 # ── Recurring Tasks (optional) ────────────────────────────────────────────────
 # Remove or comment out this section to disable recurring task automation.

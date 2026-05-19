@@ -266,6 +266,43 @@ def poll_database(client: NotionClient, database_id: str, snapshot: dict[str, di
     return new_snapshot
 
 
+def _poll_rtd_for_changes(
+    client: NotionClient, rt_defs_id: str, rtd_snapshot: dict[str, dict], since: str
+) -> tuple[dict[str, dict], bool]:
+    """
+    Poll the RTD database for changes since `since`. No automations run on RTD pages —
+    this is purely for change detection. Returns (updated_snapshot, changed).
+    """
+    filter_payload = {
+        "timestamp": "last_edited_time",
+        "last_edited_time": {"on_or_after": since},
+    }
+    try:
+        pages = client.query_database(rt_defs_id, filter_payload=filter_payload)
+    except Exception as e:
+        logger.error(f"Failed to poll RTD database: {e}")
+        return rtd_snapshot, False
+
+    if not pages:
+        return rtd_snapshot, False
+
+    new_snapshot = dict(rtd_snapshot)
+    changed = False
+    for page in pages:
+        stripped = _strip_files(page)
+        prev = rtd_snapshot.get(page["id"])
+        if (prev is not None
+                and page.get("last_edited_time") == prev.get("last_edited_time")
+                and stripped == prev):
+            new_snapshot[page["id"]] = stripped
+            continue  # boundary overlap — truly unchanged
+        new_snapshot[page["id"]] = stripped
+        changed = True
+        logger.info(f"RTD change detected on page {page['id']} — will trigger governance.")
+
+    return new_snapshot, changed
+
+
 def main():
     with open(args.config, "rb") as f:
         cfg = tomllib.load(f)
@@ -283,6 +320,7 @@ def main():
 
     poll_interval = cfg.get("poll_interval", 60)
 
+    rt_defs_id: str | None = None
     rt_cfg = cfg.get("recurring_tasks", {})
     if rt_cfg.get("enabled"):
         rt_defs_id = rt_cfg.get("definitions_db_id")
@@ -291,6 +329,7 @@ def main():
             recurring_tasks.init(rt_defs_id, rt_tasks_id)
         else:
             logger.warning("recurring_tasks enabled but definitions_db_id or tasks_db_id is missing — skipping.")
+            rt_defs_id = None
 
     client = NotionClient(token, debug=args.debug)
 
@@ -318,6 +357,19 @@ def main():
         logger.info("--governance-only flag set: exiting after governance pass.")
         return
 
+    # Build RTD snapshot after startup governance so bot-written Bot Notes are
+    # captured as the baseline — preventing them from re-triggering governance next poll.
+    rtd_snapshot: dict[str, dict] = {}
+    last_polled_rtd: str | None = None
+    if rt_defs_id:
+        try:
+            rtd_pages = client.query_database(rt_defs_id)
+            rtd_snapshot = {p["id"]: _strip_files(p) for p in rtd_pages}
+            last_polled_rtd = _utcnow_iso()
+            logger.info(f"RTD snapshot built ({len(rtd_pages)} definition(s)).")
+        except Exception as e:
+            logger.error(f"Failed to build RTD snapshot: {e}")
+
     # Subsequent polls only fetch pages edited after startup.
     last_polled: dict[str, str] = {db_id: startup_time for db_id in database_ids}
 
@@ -343,6 +395,34 @@ def main():
             gov_created = run_governance(client)
             if gov_created:
                 _init_pass_on_pages(client, gov_created, snapshots)
+            # Refresh RTD snapshot post-governance so bot-written Bot Notes become
+            # the new baseline and don't re-trigger governance next poll.
+            if rt_defs_id and last_polled_rtd is not None:
+                try:
+                    rtd_pages = client.query_database(rt_defs_id)
+                    rtd_snapshot = {p["id"]: _strip_files(p) for p in rtd_pages}
+                    last_polled_rtd = _utcnow_iso()
+                except Exception as e:
+                    logger.error(f"Failed to refresh RTD snapshot after 2am governance: {e}")
+
+        # RTD change detection — triggers governance when any RTD is added or modified.
+        if rt_defs_id and last_polled_rtd is not None:
+            rtd_poll_start = _utcnow_iso()
+            rtd_snapshot, rtd_changed = _poll_rtd_for_changes(
+                client, rt_defs_id, rtd_snapshot, last_polled_rtd
+            )
+            last_polled_rtd = rtd_poll_start
+            if rtd_changed:
+                logger.info("RTD changes detected — running governance.")
+                gov_created = run_governance(client)
+                if gov_created:
+                    _init_pass_on_pages(client, gov_created, snapshots)
+                # Refresh RTD snapshot so bot-written Bot Notes don't re-trigger governance.
+                try:
+                    rtd_pages = client.query_database(rt_defs_id)
+                    rtd_snapshot = {p["id"]: _strip_files(p) for p in rtd_pages}
+                except Exception as e:
+                    logger.error(f"Failed to refresh RTD snapshot after governance: {e}")
 
         for db_id in database_ids:
             poll_start = _utcnow_iso()

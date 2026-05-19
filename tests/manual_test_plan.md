@@ -39,7 +39,7 @@ for the 2am cron or restarting the daemon to trigger the governance pass).
 ---
 
 ### A3 — Inactive RTD — no new task
-**Setup:** RTD exists but Active checkbox is unchecked. Task linked to it.  
+**Setup:** RTD exists with Status ≠ "Active" (e.g. "On Hold" or any non-Active value). Task linked to it.  
 **Action:** Set task Status → Done.  
 **Expected:** No new task created.  
 **Status:** `[P]`
@@ -537,38 +537,6 @@ The pre-filled date has no direct influence on where the new task goes; it only 
 
 ---
 
-### I8 — `closed_date` flag absent → no Closed Date stamped, no 400 errors
-**Setup:** Config with `closed_date` absent (or `false`) for the task database. Task database has a Closed Date column.  
-**Action:** Close a task (status → Done).  
-**Expected:** No Closed Date is stamped, no 400 API errors in logs. All other automations still fire normally.  
-**Status:** `[ ]`
-
----
-
-### I9 — `reopen_count` absent with `closed_date = true` → Closed Date still works, Reopen Count not written
-**Setup:** Config with `closed_date = true` and `reopen_count` absent (or `false`).  
-**Action:** Close a task, then reopen it.  
-**Expected:** Closed Date is stamped on close. On reopen, Closed Date is cleared. Reopen Count is never written — no 400 errors, no initialization attempt.  
-**Status:** `[ ]`
-
----
-
-### I10 — `due_date_tracking` absent → Due Date Update Count and First Due Date never written
-**Setup:** Config with `due_date_tracking` absent (or `false`). Task database has Due Date Update Count and First Due Date columns.  
-**Action:** Set or change a Due Date on a task.  
-**Expected:** Neither Due Date Update Count nor First Due Date is written. No 400 API errors.  
-**Status:** `[ ]`
-
----
-
-### I11 — Recurring tasks enabled, Closed Date column absent → CRITICAL error logged
-**Setup:** `recurring_tasks.enabled = true` in config. Remove the Closed Date column from the task database in Notion.  
-**Action:** Start daemon (or run `--governance-only`).  
-**Expected:** CRITICAL error logged at governance startup: "Closed Date column not found". Daemon continues — does not abort. Recurring task behavior will be incorrect but other automations are unaffected.  
-**Status:** `[ ]`
-
----
-
 ### I7 — Optional fields added mid-session require restart before bot writes to them
 **Setup:** Run daemon with optional fields absent (per I6). Add the missing columns to the task database in Notion.  
 **Action:** Close a recurring task (no restart).  
@@ -578,12 +546,47 @@ The pre-filled date has no direct influence on where the new task goes; it only 
 
 ---
 
+### I8 — `closed_date` flag absent → no Closed Date stamped, no 400 errors
+**Setup:** Config with `closed_date` absent (or `false`) for the task database. Task database has a Closed Date column.  
+**Action:** Close a task (status → Done).  
+**Expected:** No Closed Date is stamped, no 400 API errors in logs. All other automations still fire normally.  
+**Status:** `[P]`
+
+---
+
+### I9 — `reopen_count` absent with `closed_date = true` → Closed Date still works, Reopen Count not written
+**Setup:** Config with `closed_date = true` and `reopen_count` absent (or `false`).  
+**Action:** Close a task, then reopen it.  
+**Expected:** Closed Date is stamped on close. On reopen, Closed Date is cleared. Reopen Count is never written — no 400 errors, no initialization attempt.  
+**Status:** `[P]`
+
+---
+
+### I10 — `due_date_tracking` absent → Due Date Update Count and First Due Date never written
+**Setup:** Config with `due_date_tracking` absent (or `false`). Task database has Due Date Update Count and First Due Date columns.  
+**Action:** Set or change a Due Date on a task.  
+**Expected:** Neither Due Date Update Count nor First Due Date is written. No 400 API errors.  
+**Status:** `[P]`
+
+---
+
+### I11 — Recurring tasks enabled, Closed Date column absent → CRITICAL error logged
+**Setup:** `recurring_tasks.enabled = true` in config. Remove the Closed Date column from the task database in Notion.  
+**Action:** Start daemon (or run `--governance-only`).  
+**Expected:** CRITICAL error logged at governance startup: "Closed Date column not found". Daemon continues — does not abort. Recurring task behavior will be incorrect but other automations are unaffected.  
+**Status:** `[P]`
+
+
+---
+
 ## Z — Changes/Defects that are needed based on testing (general closer analysis)
 
-### Z1 — New Recurring Task Definition doesn't create a Task
-This is a BIG MISTAKE. We need to monitor database: Recurring Task Definitions
-When I create a new (active and valid) Recurring Task Definition, the daemon doesn't see that, and no task is created. ONLY when a governance pass is made. (overnight or program is started for the first time). This needs remedied by having the polling function.  
-**Status:** `[OPEN]` — design discussion needed; polling the RTD database is a significant architectural change.
+### Z1 — New/activated RTD creates task within one poll cycle
+**Setup:** Daemon running. No governance pass pending.
+**Action (scenario A):** Create a new RTD with Status = "Active" and valid fields.
+**Action (scenario B):** Set an existing RTD's Status from non-Active → "Active".
+**Expected:** Within one poll cycle (~60s), governance fires automatically and creates a task for the current period. Log shows "RTD change detected" then "RTD changes detected — running governance."
+**Status:** `[P]`
 
 ### Z2 — Due Dates for Habits
 I don't think Habits should have auto-populating due dates.  
