@@ -1,5 +1,5 @@
 # Notion Automator — Status
-_Last updated: May 18, 2026_
+_Last updated: May 19, 2026_
 
 ## Test Results
 | ID      | Description                                                        | Status  |
@@ -59,27 +59,24 @@ _Last updated: May 18, 2026_
 ## Deploy Prerequisites
 - [Done] Rename Notion field: "Instance # (Recurring Task)" → "Occurrence # this Period (Recurring Task)"
 - [ ] Rename RTD "Cadence Type" select option: "N per period" → "Exactly N per period"
-  - Legacy normalization code removed. Deploying before the rename causes "N per period" to be unrecognized.
-- [ ] Update `config.toml` to `[[databases]]` format — **breaking change this session**
-  - Old `database_ids = [...]` key is no longer read. Daemon will error on startup until updated.
-  - See `config_example.toml` for the new format and required automation flags.
+- [ ] Rename RTD field: "Cadence N" → "N Cadence"
+- [ ] Replace RTD "Active" checkbox with "Status" field (Status = "Active" to activate)
+- [Done] Update `config.toml` to `[[databases]]` format
+- [ ] Retest A3 against new Status field in production
 
 ---
 
 ## Priorities
-_Ordered by importance. Deploy is gated on items 1–3._
+_Ordered by importance._
 
-1. **RTD Series State (Habit Lifecycle)** — Replace Active checkbox with a Status field. `[Done]`
-2. **Implement + test Z1** — RTD monitoring: new/activated RTDs create a task within one poll cycle. `[Done]`
-3. **Deploy** — rename "N per period" Notion option, rename "Cadence N" → "N Cadence", update `config.toml`, ship.
-4. **Pivot to Notion_PowerBI** — learn Notion_PowerBI before continuing here. Recurring Tasks is stable without the items below.
+4. **Pivot to Notion_PowerBI** — PC required for data connections; iPad exploration only for now.
 5. **Project Page** — Notion page as daemon home base: auto-creates child databases, Notion-based config (eventually replaces `config.toml` automation flags), status dashboard. Requires `create_database()` in `notion_api.py`. Unblocks Notifications.
 6. **Change Tracking** — Opt-in field change log (old/new value, page ID, timestamp). Storage format TBD. Feeds Notion_PowerBI.
 7. **Timer / Mission Tracking** — Link closed tasks to mission areas for effort heatmap. Attribution method not yet decided — see PLANNED.md.
 8. **Notifications** — Discord/Telegram webhooks via `notifiers.py`. Depends on Project Page for URL config.
-9. **Clear Blocking/Blocked-By on Close** — When a task closes, clear both relation fields. Two-way synced relation means one write may be enough; confirm field names before implementing — see PLANNED.md.
-10. **First Value Field Tracking** — Stamp `First [Field Name]` column with first observed value for any configured field — see PLANNED.md.
-11. **Automated Testing** — Unit tests for pure logic functions (`_period_dates`, `_period_key`, `_calc_due_date`). Defer until feature set stabilizes — see PLANNED.md.
+9. **Clear Blocking/Blocked-By on Close** — confirm exact Notion field names before implementing — see PLANNED.md.
+10. **First Value Field Tracking** — stamp `First [Field Name]` for any configured field — see PLANNED.md.
+11. **Automated Testing** — unit tests for pure logic functions after feature set stabilizes — see PLANNED.md.
 
 ---
 
@@ -93,4 +90,4 @@ _Things to file in the repository issue tracker._
 ---
 
 ## Open Decisions
-- **Project Page scope** — How much of `config.toml` moves into Notion? Does it replace the file entirely or live alongside it? Especially relevant for the `[[databases]]` automation flags added this session.
+- **Project Page scope** — How much of `config.toml` moves into Notion? Does it replace the file entirely or live alongside it? Especially relevant for the `[[databases]]` automation flags.

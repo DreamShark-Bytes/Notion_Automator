@@ -58,13 +58,17 @@ The database ID is the UUID between your workspace name and `?v=`. Copy it witho
 git clone https://github.com/DreamShark-Bytes/Notion_Automator
 cd Notion_Automator
 
-# Install Notion_API (shared dependency — must be done first)
-pip install git+https://github.com/DreamShark-Bytes/Notion_API.git
-
-# Create virtual environment and install remaining dependencies
 python3 -m venv venv
 venv/bin/pip install -r requirements.txt
 ```
+
+`requirements.txt` includes the pinned [Notion_API](https://github.com/DreamShark-Bytes/Notion_API) dependency — no separate install step needed.
+
+**Compatibility**
+
+| Notion Automator | Notion API |
+|---|---|
+| v1.x | v1.x |
 
 ### 4. Configure
 
@@ -293,6 +297,7 @@ Set `poll_interval` in `config.toml` (applies to all databases).
 2. Back up any files you've edited: `automations.py` and `config.toml` are the only ones you're expected to modify
 3. Pull the latest changes: `git pull`
 4. Install any new dependencies: `venv/bin/pip install -r requirements.txt`
+   - This also updates [Notion_API](https://github.com/DreamShark-Bytes/Notion_API) if the pinned version changed. The release notes will call this out explicitly when it applies.
 5. Apply any Notion-side changes listed in the release notes (field renames, new select options, new columns)
 6. Update `config.toml` to match any new config format changes
 7. Start the service: `sudo systemctl start notion-daemon`

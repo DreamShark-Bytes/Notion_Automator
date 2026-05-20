@@ -22,10 +22,14 @@ except ImportError:
         sys.exit("Python < 3.11 detected: install tomli with 'pip install tomli'")
 
 from notion_api import NotionClient
+import notion_api as _notion_api
 from automations import AUTOMATIONS, GOVERNANCE, register_db as register_automation_db
 from bot_notes import clear_bot_notes, flush_bot_notes
 import recurring_tasks
 from recurring_tasks import BOT_CREATED_PAGES_KEY
+
+VERSION = "1.0.1"
+NOTION_API_MIN_VERSION = "1.0.1"
 
 parser = argparse.ArgumentParser(description="Notion automation daemon")
 parser.add_argument(
@@ -332,6 +336,20 @@ def main():
             rt_defs_id = None
 
     client = NotionClient(token, debug=args.debug)
+
+    api_version = getattr(_notion_api, "__version__", None)
+    if api_version is None:
+        logger.warning("Notion_API version unknown — run: venv/bin/pip install -r requirements.txt")
+    else:
+        logger.info(f"Notion Automator v{VERSION} | Notion API v{api_version}")
+        min_tuple = tuple(int(x) for x in NOTION_API_MIN_VERSION.split("."))
+        installed_tuple = tuple(int(x) for x in api_version.split("."))
+        if installed_tuple < min_tuple:
+            logger.warning(
+                f"Notion_API v{api_version} is below minimum v{NOTION_API_MIN_VERSION}"
+                f" — run: venv/bin/pip install -r requirements.txt"
+            )
+
 
     # Record startup time before the governance pass so the first poll catches
     # any changes that occur during the (potentially slow) initial fetch.

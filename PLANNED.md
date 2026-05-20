@@ -4,60 +4,6 @@ Living design document. Sections are deleted when a feature is implemented and i
 
 ---
 
-## RTD Series State (Habit Lifecycle)
-
-**Status:** In design
-**One-liner:** Replace the Active checkbox on RTDs with a richer Status field that captures why a series is inactive — enabling semantic reporting and informational bot notes on stale open tasks.
-
-### Problem being solved
-The current Active checkbox is binary — it doesn't distinguish between "paused temporarily," "habit successfully formed," "bad habit eliminated," and "responsibility no longer relevant." This distinction matters for PowerBI reporting (how many habits were established vs. abandoned, average time to establishment) and for the user's own understanding of their series history.
-
-### Decisions made
-
-**Status field replaces the Active checkbox on the RTD.**
-Notion's built-in status groups provide visual organization in the database view without requiring any additional bot logic.
-
-| Status | Group | Bot creates tasks? |
-|---|---|---|
-| `Planned` | To-do | No |
-| `Active` | In Progress | **Yes — only this status** |
-| `On Hold` | In Progress | No |
-| `Completed` | Complete | No |
-| `Retired` | Complete | No |
-| `Abandoned` | Complete | No |
-
-**Bot logic: `Status == "Active"` is the only check.** Group membership is irrelevant to the bot — it checks the status value only. This means adding new statuses in future is safe by default (bot ignores them unless explicitly coded).
-
-**Type + Status carries semantic meaning; no type-specific statuses needed.**
-In reporting, the combination of Type and Status tells the full story:
-- Good Habit + Completed → habit established
-- Bad Habit + Completed → behavior eliminated
-- Responsibility + Retired → no longer applicable
-Terminal statuses are shared across all types; the Type column provides the interpretation in PowerBI.
-
-**Bot Note on RTD when series is inactive but an open task exists.**
-Message: *"Series is not active but there is an open task."*
-- Appears when: `Status ≠ Active` AND at least one open task is linked to this RTD
-- Clears when: no open tasks exist for the RTD (governance pass finds count = 0)
-- Mechanism: existing Bot Notes accumulator on RTDs — no new architecture needed
-- Instructional content (why Active is the only task-creating status) belongs in field descriptions and a Usage Guide, not the bot note
-
-**No destructive action on open tasks when RTD goes inactive.**
-Follows the least-destructive-intervention principle (§1.1). The open task stays open; the user closes it when ready. The bot note on the RTD is the only intervention.
-
-**Note clearing is governance-timed, not event-driven.**
-Notion does not push deletion or change notifications. The bot detects open task count at each governance pass (startup + 2am cron). Note may persist until the next governance run — acceptable given it's informational only.
-
-### Open questions
-- **Active checkbox relationship:** Does the new Status field fully replace the Active checkbox, or does it work alongside it? Replacing is cleaner (one field, not two) but requires updating every code path that currently checks `Active`. Recommend replacing, but this is a decision for implementation planning.
-- **Reversal behavior:** When Status returns to `Active` from a terminal state (e.g. relapse on a formed habit), governance creates a new task as normal. Should the series history (prior terminal state) be preserved anywhere, or is it sufficient that Change Tracking logs the transition? Depends on Change Tracking being implemented.
-- **`Planned` status and governance:** Should governance warn if an RTD has been in `Planned` state for longer than some threshold? Or is it purely informational with no bot action?
-
-### Dependencies
-- **RTD monitoring** (open decision in STATUS.md) — required for real-time detection of Status changes (e.g. task creation when an RTD transitions from Planned → Active mid-day). The bot note itself works without RTD monitoring since it runs in the governance pass.
-- **Change Tracking** — required for lifecycle history: when a series was established, how long it was active, reversal count. Without Change Tracking, only the current state is known.
-
----
 
 ## Change Tracking
 
@@ -98,36 +44,60 @@ fields = ["Status", "Due Date", "Assignee"]  # opt-in list
 
 ---
 
-## Project Page
+## Automation Hub (formerly "Project Page")
 
 **Status:** Pre-design
-**One-liner:** A single Notion page acts as the daemon's home base — auto-creates child databases on first run, provides a status dashboard, and surfaces configuration without editing `config.toml`.
+**One-liner:** A single Notion page serves as the hub for all Notion Automator configuration, health status, and errors — one place to see and manage everything the bot does.
+
+**Name note:** "Project Page" was used internally but is ambiguous. "Automation Hub" is preferred going forward. References in DESIGN.md and STATUS.md should be updated when this feature moves to implementation.
 
 ### Decisions made so far
 - Auto-detection over activation buttons — daemon detects what exists and creates what is missing; no explicit "activate" step.
-- User creates the Project Page manually and adds its ID to `config.toml` (one-time step). Bot fills in the rest.
-- Notion page IDs are permanent — users can move created pages anywhere after initial creation.
-- Preference: automatic setup with a clear startup log of what was created (over a wizard-style prompt).
+- User creates the Hub page manually and adds its ID to `config.toml` (one-time step). Bot fills in the rest.
+- Notion page IDs are permanent — users can move the Hub page anywhere after initial creation.
+- Preference: automatic setup with a clear startup log of what was created.
+- **Single hub for all automations** — not a page-per-database. All task database configs and recurring task config live here together, mirroring the structure of `config.toml`.
 
-### Planned capabilities
-- **Database bootstrapping:** auto-create the RTD database as a child of the Project Page on first run; write the new DB ID to `config.toml` or log it.
-- **Status dashboard:** last poll time, health indicators, recent errors — written to the Project Page by the daemon.
-- **Notion-based configuration:** fields on the Project Page (or child databases) that the daemon reads:
-  - Recurring task field copy exclusions (beyond `FIELDS_NOT_INHERITED` defaults)
-  - Task naming format (cadence suffix on/off)
-  - Notification webhook URLs and alert conditions
+### Layout concept (mirrors config.toml structure)
+
+**Section 1: Task Databases**
+A child database (table view) where each row is a task database the bot monitors.
+
+| Column                | Type      | Notes                                                             |
+| -----------------------| -----------| -------------------------------------------------------------------|
+| Name                  | Title     | Human-readable label                                              |
+| Database ID           | Text      | Notion database ID                                                |
+| Closed Date           | Checkbox  | Enables closed date stamping                                      |
+| Reopen Count          | Checkbox  | Enables reopen count tracking                                     |
+| Due Date Update Count | Checkbox  | Enables due date change counter                                   |
+| First Value Fields    | Text      | Comma-separated list of fields to track (e.g. "Due Date, Status") |
+| Errors & Warnings     | Rich Text | Bot-written; cleared when resolved                                |
+
+**Section 2: Recurring Tasks**
+A block (or small sub-page) showing the `[recurring_tasks]` config: definitions DB ID, tasks DB ID, enabled toggle. Errors and warnings from governance written here.
+
+**Section 3: Bot Health**
+Last poll time, daemon uptime, most recent governance run. Written on each governance pass (not every poll — too noisy).
+
+Activity counters are a back-burner idea here. Useful candidates: total recurring tasks created (lifetime), closed date stamps per period. Risk: every increment is an API write, which adds up quickly at poll frequency. Preferred approach: derive counters from the Change Tracking log (already planned) rather than maintaining them independently — log is source of truth, Hub surfaces the summary. Do not implement until Change Tracking exists.
+
+### On "selectable field" for First Value Field tracking
+Notion does not have a native field-selector property type (the relation/rollup selector in the UI is not exposed as a reusable property). The closest approximation: a text field where the user types the field name manually. This is consistent with how `first_value_fields` works in `config.toml`. A dedicated child database (one row per tracked field, with a relation back to the Task Databases table) is possible but likely over-engineered for v1.
 
 ### Required code additions
 - `create_database(parent_page_id, title, properties)` — to be added to `notion_api.py`.
+- Bot must read Hub config at startup (after `config.toml`) and merge with or override local flags.
+- Bot must write errors/warnings per-database-row rather than only to logs.
 
 ### Open questions
-- Which config values move from `config.toml` to Notion? All of them, or only the ones non-technical users need to adjust?
-- Status dashboard: how often is it written? Every poll (noisy) or only on governance runs?
-- Error surfacing: written to the Project Page, or only logged to file?
+- Which config values move from `config.toml` to Notion? Proposal: `config.toml` remains the source of truth for IDs and the Hub page ID; all automation flags migrate to Notion so non-technical users can toggle them without editing a file.
+- Status dashboard write frequency: governance runs only (startup + 2am cron) to avoid excessive API writes.
+- When Hub config and `config.toml` conflict, which wins? Proposal: Hub takes precedence for flags; `config.toml` required only for IDs and the Hub page ID itself.
 
 ### Dependencies
-- Project Page must exist before Notifications can store webhook URLs there.
+- Automation Hub must exist before Notifications can store webhook URLs there.
 - `create_database()` API method needed in `notion_api.py` first.
+- Every automation must be updated to write its errors/warnings to the Hub row for its database rather than only to logs.
 
 ---
 
@@ -139,7 +109,7 @@ fields = ["Status", "Due Date", "Assignee"]  # opt-in list
 ### Decisions made so far
 - Implemented as `notifiers.py` — a utility module, not an automation function.
 - Automations call it as a side effect — outside the `automations.py` return-dict pattern.
-- Webhook URLs stored in the Project Page (not hardcoded in `config.toml`).
+- Webhook URLs stored in the Automation Hub (not hardcoded in `config.toml`).
 
 ### Open questions
 - Which events trigger a notification? (e.g. task deleted and replaced, grace period cancel, RTD duplicate name, At-most-N cap reached)

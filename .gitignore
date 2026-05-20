@@ -16,3 +16,6 @@ venv/
 
 # Logs
 *.log*
+
+# Tools (for now)
+/tools
