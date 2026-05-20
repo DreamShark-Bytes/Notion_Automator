@@ -69,11 +69,12 @@ _Last updated: May 19, 2026_
 ## Priorities
 _Ordered by importance._
 
+3. **Bug: "Minimum N per period" period transition** — wrong due date on next task when minimum is met; governance should archive (not cancel) when minimum was met. See PLANNED.md.
 4. **Pivot to Notion_PowerBI** — PC required for data connections; iPad exploration only for now.
-5. **Project Page** — Notion page as daemon home base: auto-creates child databases, Notion-based config (eventually replaces `config.toml` automation flags), status dashboard. Requires `create_database()` in `notion_api.py`. Unblocks Notifications.
+5. **Automation Hub** — A single Notion page as the daemon home base: task database configs (checkboxes per flag), recurring tasks config, bot health dashboard. Requires `create_database()` in `notion_api.py`. Unblocks Notifications. (Formerly "Project Page" — see PLANNED.md.)
 6. **Change Tracking** — Opt-in field change log (old/new value, page ID, timestamp). Storage format TBD. Feeds Notion_PowerBI.
 7. **Timer / Mission Tracking** — Link closed tasks to mission areas for effort heatmap. Attribution method not yet decided — see PLANNED.md.
-8. **Notifications** — Discord/Telegram webhooks via `notifiers.py`. Depends on Project Page for URL config.
+8. **Notifications** — Discord/Telegram webhooks via `notifiers.py`. Depends on Automation Hub for URL config.
 9. **Clear Blocking/Blocked-By on Close** — confirm exact Notion field names before implementing — see PLANNED.md.
 10. **First Value Field Tracking** — stamp `First [Field Name]` for any configured field — see PLANNED.md.
 11. **Automated Testing** — unit tests for pure logic functions after feature set stabilizes — see PLANNED.md.
@@ -90,4 +91,4 @@ _Things to file in the repository issue tracker._
 ---
 
 ## Open Decisions
-- **Project Page scope** — How much of `config.toml` moves into Notion? Does it replace the file entirely or live alongside it? Especially relevant for the `[[databases]]` automation flags.
+- **Automation Hub scope** — How much of `config.toml` moves into Notion? Does it replace the file entirely or live alongside it? Especially relevant for the `[[databases]]` automation flags.

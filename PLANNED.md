@@ -5,6 +5,31 @@ Living design document. Sections are deleted when a feature is implemented and i
 ---
 
 
+## Bug: "Minimum N per period" period transition behavior
+
+**Status:** Ready to implement
+**One-liner:** Two wrong behaviors when a Minimum N per period series crosses a period boundary — tasks advance to next period too early, and stale-period cleanup uses Cancel when it shouldn't.
+
+### Decisions made
+
+**During-period behavior (on task close):**
+- When Occurrence # reaches N (minimum met), create the next task with the **current period's** due date, not the next period's. Minimum means more completions are still welcome; the period should stay open.
+- When Occurrence # is below N, behavior is unchanged — create next task for the same period as before.
+
+**Stale-period governance (due date has passed, period has rolled over):**
+- **Minimum NOT met:** Cancel the open task (records the failure). Create a fresh task for the new period.
+- **Minimum WAS met:** Archive (delete via API) the open task — do NOT cancel, as cancellation implies failure. Create a fresh task for the new period. Creating fresh rather than updating Due Date on the existing task prevents Due Date Update Count from firing. Standard duplicate guard applies.
+
+**On recording missed completions as phantom cancelled tasks:** Not worth implementing. Occurrence # on the cancelled task already captures how many were completed — the gap to N is inferable without polluting the database.
+
+### Open questions
+- Does `notion_api.py` already support archiving a page (`PATCH /pages/{id}` with `{"archived": true}`)? Likely needs a new method or a flag on `update_page`. Verify before implementing.
+
+### Dependencies
+- None. Isolated to `recurring_tasks.py`.
+
+---
+
 ## Change Tracking
 
 **Status:** Pre-design
@@ -224,3 +249,26 @@ The user maintains high-level mission/workbench areas in Notion. Each mission ha
 
 ### Dependencies
 - Feature set should be stable before investing in tests. Revisit after PowerBI pivot.
+
+---
+
+## Bulk Edit Tool (tools/)
+
+**Status:** Idea (not yet designed)
+**One-liner:** CLI script in `tools/` to apply mass or individual property edits to Notion pages — e.g. recategorize a group of tasks, fix a field value across many pages.
+
+### Context
+Power BI is read-only — no write-back possible. When analysis reveals data that needs correcting in Notion (wrong category, bad status, etc.), the fix has to happen in Notion itself. A CLI tool here (alongside `fix_closed_date_timezone.py`) lets you select pages by filter and patch one or more properties in bulk, with the same backup-before-edit safety pattern already established.
+
+### Decisions made
+- Lives in `tools/` in this project (Notion_Automator owns all Notion write operations).
+- Should follow the backup-then-patch pattern from `fix_closed_date_timezone.py` — write a CSV of old values before applying any changes.
+- Counterpart `revert_from_backup.py` already exists and is generic enough to handle reverts.
+
+### Open questions
+- Selection method: filter by property value (e.g. all tasks where Area = "X")? Manual page ID list? Both?
+- Interactive confirmation showing a preview of what will change before committing.
+- Scope: single database only, or cross-database edits?
+
+### Dependencies
+- None. Standalone script using existing `notion_api.py`.
