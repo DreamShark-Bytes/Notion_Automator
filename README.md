@@ -195,31 +195,31 @@ Keeps one open task per series at all times. When a task is marked Done or Cance
 
 Create a new database in Notion with these fields:
 
-| Field | Type | Notes |
-|---|---|---|
-| Name | Title | |
-| Type | Select | `Habit`, `Bad Habit`, `Responsibility` |
-| Status | Status | Bot only creates tasks when Status = `Active` |
-| Cadence Type | Select | `Once per period`, `Exactly N per period`, `At most N per period`, `Minimum N per period`, `Unlimited` |
-| N Cadence | Number | Used by cadence types that reference N; blank for others |
-| Period | Select | `Day`, `Week`, `Month`, `Year` |
-| Anchor Day | Number | Mon=1 … Sun=7 for weekly; 1–31 for monthly (overflows to last day of month) |
-| Anchor Time | Text | e.g. `13:00`; blank = no specific time |
-| Grace Period (days) | Number | Responsibilities only — auto-cancelled this many days past due; blank = never |
-| Notes | Rich Text | |
-| Last Completed | Rollup | Max of `Closed Date` from related tasks |
+| Field               | Type      | Notes                                                                                                  |
+| ---------------------| -----------| --------------------------------------------------------------------------------------------------------|
+| Name                | Title     |                                                                                                        |
+| Type                | Select    | `Habit`, `Bad Habit`, `Responsibility`                                                                 |
+| Status              | Status    | Bot only creates tasks when Status = `Active`                                                          |
+| Cadence Type        | Select    | `Once per period`, `Exactly N per period`, `At most N per period`, `Minimum N per period`, `Unlimited` |
+| N Cadence           | Number    | Used by cadence types that reference N; blank for others                                               |
+| Period              | Select    | `Day`, `Week`, `Month`, `Year`                                                                         |
+| Anchor Day          | Number    | Mon=1 … Sun=7 for weekly; 1–31 for monthly (overflows to last day of month)                            |
+| Anchor Time         | Text      | e.g. `13:00`; blank = no specific time                                                                 |
+| Grace Period (days) | Number    | Responsibilities only — auto-cancelled this many days past due; blank = never                          |
+| Notes               | Rich Text |                                                                                                        |
+| Last Completed      | Rollup    | Max of `Closed Date` from related tasks                                                                |
 
 ### Notion setup — Task database
 
 Add these fields to your main tasks database:
 
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| Recurring Series | Relation | Yes | Points to the Definitions database |
-| Closed Date | Date | Yes | Required for period logic — see [Closed Date Stamping](#closed-date-stamping) |
-| Occurrence # this Period (Recurring Task) | Number | No | Count of completions this period; filled in by the bot |
-| Period Key (Recurring Task) | Text | No | Display label for the current period — written by the bot, do not edit |
-| Period Target (Recurring Task) | Text | No | e.g. `Minimum 3 per Week` — set by the bot at creation |
+| Field                                     | Type     | Required | Notes                                                                         |
+| -------------------------------------------| ----------| ----------| -------------------------------------------------------------------------------|
+| Recurring Series                          | Relation | Yes      | Points to the Definitions database                                            |
+| Closed Date                               | Date     | Yes      | Required for period logic — see [Closed Date Stamping](#closed-date-stamping) |
+| Occurrence # this Period (Recurring Task) | Number   | No       | Count of completions this period; filled in by the bot                        |
+| Period Key (Recurring Task)               | Text     | No       | Display label for the current period — written by the bot, do not edit        |
+| Period Target (Recurring Task)            | Text     | No       | e.g. `Minimum 3 per Week` — set by the bot at creation                        |
 
 Connect your integration to both databases (`...` menu → **Add connections**).
 
@@ -280,14 +280,14 @@ Set `poll_interval` in `config.toml` (applies to all databases).
 
 ## How it compares to Notion's built-in automations
 
-| Feature | This daemon | Notion built-in |
-|---|---|---|
-| Trigger on change | ✅ (within poll interval) | ✅ (instant) |
-| Custom logic in Python | ✅ | ❌ |
-| Recurring tasks | ✅ | ✅ |
-| Outbound webhooks | ✅ (add your own code) | ✅ (paid plans) |
-| Always-on device required | ✅ (Raspberry Pi works great) | ❌ |
-| Subscription required | ❌ | ✅ |
+| Feature                   | This daemon                  | Notion built-in |
+| ---------------------------| ------------------------------| -----------------|
+| Trigger on change         | ✅ (within poll interval)     | ✅ (instant)     |
+| Custom logic in Python    | ✅                            | ❌               |
+| Recurring tasks           | ✅                            | ✅               |
+| Outbound webhooks         | ✅ (add your own code)        | ✅ (paid plans)  |
+| Always-on device required | ✅ (Raspberry Pi works great) | ❌               |
+| Subscription required     | ❌                            | ✅               |
 
 ---
 

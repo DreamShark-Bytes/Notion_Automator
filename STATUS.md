@@ -1,76 +1,19 @@
 # Notion Automator — Status
-_Last updated: May 19, 2026_
+_Last updated: May 22, 2026_
 
-## Test Results
-| ID      | Description                                                        | Status  |
-| ---------| --------------------------------------------------------------------| ---------|
-| A1      | Close triggers next task (Unlimited)                               | [P]     |
-| A2      | Close triggers next task in next period (Once per period)          | [P]     |
-| A3      | Inactive RTD (Status ≠ Active) — no new task                       | [ ]     |
-| A4      | Task not linked to RTD — no action                                 | [P]     |
-| A4b     | No duplicate if target period already has open task                | [P]     |
-| A5      | Manually created task with missing bot fields gets initialized     | [P]     |
-| B1      | Day period key uses local date                                     | [P]     |
-| B2      | Week period key uses ISO week format                               | [P]     |
-| B3      | Closed Date determines period boundary                             | [P]     |
-| B4      | Pre-filled Closed Date respected on recurring task close           | [P]     |
-| B5      | Period Key unchanged on unrelated property edit                    | [P]     |
-| **B6**  | No Anchor Day: Due Date = end of period (not full span)            | **[P]** |
-| C1      | First task of period gets Occurrence # = 1                         | [P]     |
-| C2      | Second completion in same period increments count                  | [P]     |
-| C3      | User edits Occurrence # — next task still uses COUNT               | [P]     |
-| C4      | New period resets Occurrence # to 1                                | [P]     |
-| C5      | Bad Habit: Occurrence # resets at period boundary                  | [P]     |
-| D1      | Overdue Responsibility task is auto-cancelled                      | [P]     |
-| D2      | Task within grace window is NOT cancelled                          | [P]     |
-| D3      | Ignore Grace Period checkbox bypasses auto-cancel                  | [P]     |
-| D4      | Stale period + 1 day into new period → auto-cancel                 | [P]     |
-| D5      | Non-Responsibility type is NOT auto-cancelled                      | [P]     |
-| D6      | No Due Date → no auto-cancel                                       | [P]     |
-| E1–E4   | Bot Notes: duplicate name, multiple open tasks                     | [S]     |
-| E5      | At-most-N cap exceeded → note on RTD                               | [P]     |
-| **E6**  | Invalid Anchor Time format → Bot Note on RTD                       | **[P]** |
-| E7      | Exactly N per period: N completions → next period task             | [P]     |
-| **E8**  | Exactly N per period exceeded → Bot Note on RTD                    | **[P]** |
-| F1      | Startup governance initializes missing fields                      | [P]     |
-| F2      | RTD with zero open tasks → task created at startup                 | [P]     |
-| **F2b** | Multiple open tasks in different periods preserved                 | **[P]** |
-| **F2c** | Future-period open task does not block current-period creation     | **[P]** |
-| F3–F4   | 2am cron timing                                                    | [S]     |
-| G1–G4   | Closed Date stamp / reopen / pre-fill respected (all task types)   | [P]     |
-| **G5**  | Governance backfills Closed Date for already-Complete tasks        | **[P]** |
-| H1–H5   | Due Date Update Count and First Due Date                           | [P]     |
-| **H6**  | Changing Due Date time only does NOT increment count               | **[P]** |
-| **H7**  | Same as H6 with different date scenario                            | **[P]** |
-| **I6**  | Optional task fields absent → bot skips writes without crashing    | **[P]** |
-| I7      | Optional fields added mid-session require restart to write to them | [P]     |
-| **I8**  | `closed_date` flag absent → no Closed Date stamped, no 400 errors  | **[P]** |
-| **I9**  | `reopen_count` absent → Closed Date still works, count not written | **[P]** |
-| **I10** | `due_date_tracking` absent → count/first-date never written        | **[P]** |
-| **I11** | Recurring tasks + Closed Date column absent → CRITICAL logged      | **[P]** |
-| I1      | RTD page deleted mid-run — daemon continues without crash          | [S]     |
-| I2      | Notion API error during task creation                              | [S]     |
-| **I3**  | Task linked to multiple RTDs — graceful handling                   | **[S]** |
-| I4–I5   | First-sight init, unchanged-page skip                              | [S]     |
-| **Z1**  | New/activated RTD creates task within one poll cycle (no restart)  | **[P]** |
-
----
-
-## Deploy Prerequisites
-- [Done] Rename Notion field: "Instance # (Recurring Task)" → "Occurrence # this Period (Recurring Task)"
-- [ ] Rename RTD "Cadence Type" select option: "N per period" → "Exactly N per period"
-- [ ] Rename RTD field: "Cadence N" → "N Cadence"
-- [ ] Replace RTD "Active" checkbox with "Status" field (Status = "Active" to activate)
-- [Done] Update `config.toml` to `[[databases]]` format
-- [ ] Retest A3 against new Status field in production
+## Project Info
+**Version:** v1.0.1
+**Open GitHub Issues:** #4 — "Minimum N per period" period transition bug
 
 ---
 
 ## Priorities
 _Ordered by importance._
 
+1. bug: daily due date off by 1
+2. bug: field inheritance
 3. **Bug: "Minimum N per period" period transition** — wrong due date on next task when minimum is met; governance should archive (not cancel) when minimum was met. See PLANNED.md.
-4. **Pivot to Notion_PowerBI** — PC required for data connections; iPad exploration only for now.
+4. 4. **Pivot (back) to Notion_PowerBI** — PC required for data connections; iPad exploration only for now.
 5. **Automation Hub** — A single Notion page as the daemon home base: task database configs (checkboxes per flag), recurring tasks config, bot health dashboard. Requires `create_database()` in `notion_api.py`. Unblocks Notifications. (Formerly "Project Page" — see PLANNED.md.)
 6. **Change Tracking** — Opt-in field change log (old/new value, page ID, timestamp). Storage format TBD. Feeds Notion_PowerBI.
 7. **Timer / Mission Tracking** — Link closed tasks to mission areas for effort heatmap. Attribution method not yet decided — see PLANNED.md.
@@ -81,14 +24,70 @@ _Ordered by importance._
 
 ---
 
+## Test Results
+_Only tests from current session or currently pending. Full test history in `tests/manual_test_plan.md`._
+
+| ID      | Description                                                        | Status  |
+| ---------| --------------------------------------------------------------------| ---------|
+| B2      | Week period key uses W-YYYY-MM-DD format (date of week-start day)  | [P]     |
+| **P4**  | Minimum N=0 governance: creates task for current period, not next  | **[ ]** |
+| **I8**  | `closed_date` flag absent → no Closed Date stamped, no 400 errors  | **[P]** |
+| **I9**  | `reopen_count` absent → Closed Date still works, count not written | **[P]** |
+| **I10** | `due_date_tracking` absent → count/first-date never written        | **[P]** |
+| **I11** | Recurring tasks + Closed Date column absent → CRITICAL logged      | **[P]** |
+| **Z1**  | New/activated RTD creates task within one poll cycle (no restart)  | **[P]** |
+
+---
+
+## Production Bugs
+
+| ID  | Description                                                                          | Status              |
+| -----| --------------------------------------------------------------------------------------| ---------------------|
+| P3  | Select/Multi-select fields not copied to new recurring tasks                         | Needs investigation |
+| P4  | Once-daily Responsibility created task with wrong due date (5/23 instead of 5/22)    | Fixed               |
+| P5  | RTD Grace Period change (1→empty) not reflected in governance despite RTD monitoring | Needs fix           |
+
+### P3 Notes — field inheritance
+- `FIELDS_NOT_INHERITED` is a blacklist (skip these, copy everything else)
+- `_copy_inherited_props()` also skips read-only prop types via `_READONLY_PROP_TYPES`
+- Select/multi-select are NOT read-only — investigate whether they're being silently skipped due to a normalization or build error in `_copy_inherited_props`
+- Fields to test: relation, text, checkbox (not yet tested)
+- Proposed fix: replace `FIELDS_NOT_INHERITED` with `fields_inheritance_list_is_inclusive: bool` + `inheritance_fields: list` — see PLANNED.md
+
+### P4 Notes — daily due date off by one
+- Was correct 5/19–5/21, broke on 5/22 (created task due 5/23 instead of 5/22)
+- Occurrence # = 1 on all tasks (correct for Once per period)
+- Investigate `_calc_due_date` for daily period — possible off-by-one at a day boundary
+
+### P5 Notes — RTD config changes not propagating
+- Governance re-fetches RTDs fresh from Notion API each run — no explicit cache
+- Likely race: Z1 detects change → triggers governance immediately → Notion API hasn't propagated the edit yet → governance runs with old value → snapshot refreshes with new value → next poll sees no change → no second governance run
+- Fix options: (a) add a short delay before governance when triggered by Z1; (b) schedule a follow-up governance run one poll cycle later; (c) re-fetch RTD individually just before using its values in governance
+
+---
+
 ## Open Issues
 _Things to file in the repository issue tracker._
 
 - **timeout tuple** — `timeout=30` in notion_api.py could be `timeout=(10, 30)` (connect vs. read) for more precision; POST/PATCH timeout carries a silent-success risk if Notion processed the write but the response never arrived
-- **Skipped tests** — E1–E4, F3–F4, I1–I5, I3 are marked [S]; decide which are worth automating or at least documenting as known gaps
+- **Skipped tests** — E1–E4, F3–F4, I1–I5, I3 are marked [S] in test plan; decide which are worth automating or at least documenting as known gaps
 - **`database_ids` removal** — no backward-compatible warning; old config silently errors; could log a helpful message pointing to config_example.toml
+- **P3** — Select/Multi-select fields not copied in recurring task inheritance (not yet filed)
+- **P4** — Once-daily task due date off by one (not yet filed)
+- **P5** — RTD config changes not reflected in governance (not yet filed)
+
+---
+
+## Deploy Prerequisites
+- [Done] Rename Notion field: "Instance # (Recurring Task)" → "Occurrence # this Period (Recurring Task)"
+- [Done] Rename RTD "Cadence Type" select option: "N per period" → "Exactly N per period"
+- [Done] Rename RTD field: "Cadence N" → "N Cadence"
+- [Done] Replace RTD "Active" checkbox with "Status" field (Status = "Active" to activate)
+- [Done] Update `config.toml` to `[[databases]]` format
+- [Done] Retest A3 against new Status field in production
+- [ ] Add `week_start = "Monday"` to `config.toml` under `[recurring_tasks]` (or omit to default to Monday). Governance will auto-update Period Key format on next run — no manual field clearing needed.
 
 ---
 
 ## Open Decisions
-- **Automation Hub scope** — How much of `config.toml` moves into Notion? Does it replace the file entirely or live alongside it? Especially relevant for the `[[databases]]` automation flags.
+- **Automation Hub scope** — How much of `config.toml` moves into Notion? Does it replace the file entirely or live alongside it? Especially relevant for the `[[databases]]` automation fla

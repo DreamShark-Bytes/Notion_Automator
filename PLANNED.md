@@ -5,6 +5,92 @@ Living design document. Sections are deleted when a feature is implemented and i
 ---
 
 
+## Improvement: Schema-Check Safety Net in automations.py
+
+**Status:** Ready to implement
+**One-liner:** `automations.py` should check field existence before writing, matching the `_filter_optional` pattern already in `recurring_tasks.py` — so a misconfigured or missing field logs a clear error and skips rather than sending a 400 to Notion.
+
+### Two layers (both kept, neither replaced)
+1. **Config flag** (`closed_date = true` etc.) — user consciously opts in. Unchanged.
+2. **Schema-check safety net** — if the flag is on but the field doesn't exist in the Notion database, log a clear error and skip that write. The rest of the automation (and other automations) continue normally.
+
+### Why this matters
+Currently, if a config flag is `true` but the field is missing from Notion, the write attempt reaches Notion's API and returns a 400 error that can poison the entire update batch for that page. `recurring_tasks.py` already avoids this via `_filter_optional` — `automations.py` needs the same safety net.
+
+### Implementation
+- At automation startup (or governance), load the task DB schema into a set (already done in `recurring_tasks.py` via `_load_task_db_schema` — expose or share this)
+- Before each property write in an automation, check if the field name is in the schema
+- If missing: `logger.error(f"Field '{field}' not found in database schema — skipping write. Check your Notion setup.")` and skip that field only
+
+### Dependencies
+- `_task_db_properties` is currently private to `recurring_tasks.py` — either expose it or replicate the schema-loading pattern in `automations.py`.
+
+---
+
+## Bug: RTD Optional Fields — Default Handling for Empty/Unknown Values
+
+**Status:** Ready to implement (partial — Type default is the remaining gap)
+**One-liner:** When an RTD has empty or unknown values for optional fields, governance should use sensible defaults rather than erroring or producing wrong results.
+
+### Current state (what's already handled)
+- **Anchor Day empty** → end-of-period anchor (already implemented)
+- **Anchor Time empty** → no specific time (already implemented)
+- **Grace Period empty / None** → treat as 0 / cancel on due date (fixed in Z8)
+
+### Remaining gap
+- **Type empty or unknown string** → treat as `"Habit"`. Currently, an unrecognized Type may cause unexpected governance behavior or a silent wrong-path execution. The fix: when reading Type from the RTD, if the value is empty, None, or not one of the known types (`"Habit"`, `"Responsibility"`, `"Bad Habit"`), default to `"Habit"` and log a warning.
+
+### Note on scope
+These fields are on the **RTD database only** — not on Task pages. No Task fields are added or changed by this fix. Users who want to surface these values on tasks can use a Notion rollup or linked-page view.
+
+### Implementation
+In `recurring_tasks.py`, when reading Type from an RTD page, add a guard:
+```python
+task_type = get_select(page, "Type") or "Habit"
+if task_type not in {"Habit", "Responsibility", "Bad Habit"}:
+    logger.warning(f"RTD '{title}' has unknown Type '{task_type}' — defaulting to 'Habit'.")
+    task_type = "Habit"
+```
+
+### Dependencies
+- None. Isolated to `recurring_tasks.py`.
+
+---
+
+## Bug: Field Inheritance for Recurring Tasks
+
+**Status:** Ready to implement (pending P3 root cause investigation)
+**One-liner:** Select, multi-select, and possibly other field types are not being copied to newly created recurring tasks — plus a design improvement to make the inheritance list configurable.
+
+### Bug (P3)
+`_copy_inherited_props()` uses `FIELDS_NOT_INHERITED` as a blacklist. Select/multi-select are not in that list and are not read-only, so they should be copied — but they aren't. Root cause needs investigation before the fix is written. Fields confirmed not copying: Select, Multi-select (priority, effort level, pursuit, area, parent/child). Fields not yet tested: relation, text, checkbox.
+
+### Design improvement — configurable inheritance
+
+Replace the module-level `FIELDS_NOT_INHERITED` set with two variables:
+
+```python
+fields_inheritance_list_is_inclusive: bool = True
+# True  → inheritance_fields is a WHITELIST (only copy these fields)
+# False → inheritance_fields is a BLACKLIST (copy everything except these)
+
+inheritance_fields: list[str] = []
+```
+
+- Boolean flag prevents misconfiguration — it's either inclusive or exclusive, no ambiguity.
+- Default behavior (empty list + inclusive=False) copies all non-bot, non-read-only fields, matching current intent.
+- User can flip to inclusive=True and list exactly which fields to carry forward, ignoring everything else.
+- These become config values in `config.toml` under `[recurring_tasks]`, not hardcoded constants.
+
+### Open questions
+- What is the actual root cause of select/multi-select not copying? (Investigate `_copy_inherited_props` before implementing the redesign.)
+- Should relation fields be copied? They reference other pages by ID — if the related page is valid, copying makes sense. But orphaned relations could cause silent Notion errors.
+
+### Dependencies
+- P3 root cause investigation must happen first.
+
+---
+
 ## Bug: "Minimum N per period" period transition behavior
 
 **Status:** Ready to implement

@@ -786,5 +786,11 @@ Resolved design decisions. Each entry states the rule and the reason so future c
 - After governance fires (whether from RTD change or 2am cron), the RTD snapshot is fully refreshed from the API. This ensures bot-written Bot Notes become the new baseline and do not re-trigger governance on the next poll.
 - `rt_defs_id` is hoisted to function scope so the poll loop can access it regardless of whether recurring tasks were fully initialized.
 
+**[week_start] The first day of the week is configurable via `week_start` in `config.toml`.**
+- Default: `"Monday"` (ISO week, unchanged behavior). Accepts any full day name ("Monday"–"Sunday").
+- Parsed in `daemon.py`, passed to `recurring_tasks.init(week_start_day)` as a 0–6 integer (0 = Monday, 6 = Sunday).
+- `_week_start_day` module variable in `recurring_tasks.py`; affects `_week_start_date()` helper, `_period_key()`, `_period_dates()` (no-anchor span), `_period_start()`, and `_period_end()`.
+- Period key format change: weekly period keys changed from ISO `"YYYY-Www"` to date-based `"W-YYYY-MM-DD"` (date of week-start day). Existing open recurring tasks with old-format period keys should have their `Period Key (Recurring Task)` field cleared before deploying, or the display value will show the old format until the next bot write.
+
 ---
 

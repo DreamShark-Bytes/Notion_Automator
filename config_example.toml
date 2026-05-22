@@ -23,3 +23,4 @@ due_date_tracking = true   # track Due Date Update Count and First Due Date
 enabled = true
 definitions_db_id = "your-recurring-definitions-database-id-here"
 tasks_db_id = "your-main-tasks-database-id-here"
+week_start = "Monday"  # Day the week starts on — affects period boundaries for weekly tasks (Monday–Sunday)

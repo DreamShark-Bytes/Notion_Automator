@@ -83,10 +83,11 @@ for the 2am cron or restarting the daemon to trigger the governance pass).
 
 ---
 
-### B2 — Week period key uses ISO week format
+### B2 — Week period key uses W-YYYY-MM-DD format (date of week-start day)
 **Setup:** RTD with Period = "Week".  
 **Action:** Complete a recurring task on any day.  
-**Expected:** New task's Period Key = "YYYY-WNN" (ISO week, e.g. "2026-W17").  
+**Expected:** New task's Period Key = "W-YYYY-MM-DD" where the date is the week-start day (e.g. "W-2026-05-18" for a Monday-start week containing May 22).  
+**Note:** Format changed from ISO `YYYY-Www` when `week_start` became configurable. Governance auto-corrects old-format keys on the next run.  
 **Status:** `[P]`
 
 ---

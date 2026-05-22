@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 _definitions_db_id: str | None = None
 _tasks_db_id: str | None = None
 _task_db_properties: set[str] = set()  # populated lazily on first governance/automation run
+_week_start_day: int = 0  # 0 = Monday … 6 = Sunday; configurable via week_start in config.toml
 
 # Sentinel key used by auto_recurring_tasks to return newly created pages
 # back through the automation protocol so daemon.py can add them to the snapshot.
@@ -48,11 +49,15 @@ OPTIONAL_TASK_FIELDS = {
 }
 
 
-def init(definitions_db_id: str, tasks_db_id: str) -> None:
-    """Call once at daemon startup to enable recurring task automation."""
-    global _definitions_db_id, _tasks_db_id
+def init(definitions_db_id: str, tasks_db_id: str, week_start_day: int = 0) -> None:
+    """Call once at daemon startup to enable recurring task automation.
+
+    week_start_day: 0 = Monday (default/ISO), 6 = Sunday, etc.
+    """
+    global _definitions_db_id, _tasks_db_id, _week_start_day
     _definitions_db_id = definitions_db_id
     _tasks_db_id = tasks_db_id
+    _week_start_day = week_start_day
 
 
 def _load_task_db_schema(client: "NotionClient") -> None:
@@ -235,12 +240,18 @@ def _get_status_group(client: "NotionClient", page: dict | None, status_field: s
 #  Period key
 # ------------------------------------------------------------------ #
 
+def _week_start_date(dt: datetime) -> datetime:
+    """Return midnight on the week-start day (per _week_start_day) that contains dt."""
+    days_since_start = (dt.weekday() - _week_start_day) % 7
+    return (dt - timedelta(days=days_since_start)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
 def _period_key(period: str, dt: datetime) -> str:
     """Canonical string identifying the period a datetime falls in."""
     if period == "Day":
         return dt.strftime("%Y-%m-%d")
     if period == "Week":
-        return dt.strftime("%G-W%V")  # ISO week year + week number
+        return _week_start_date(dt).strftime("W-%Y-%m-%d")  # date of week-start day (configurable)
     if period == "Month":
         return dt.strftime("%Y-%m")
     if period == "Year":
@@ -270,10 +281,11 @@ def _period_dates(period: str, anchor_day: int | None, use_next: bool, now: date
             target = now + timedelta(days=days_ahead)
             return target.replace(hour=0, minute=0, second=0, microsecond=0), None
         else:
-            days_to_monday = (7 - now.weekday()) % 7 or 7 if use_next else -now.weekday()
-            monday = (now + timedelta(days=days_to_monday)).replace(hour=0, minute=0, second=0, microsecond=0)
-            sunday = monday + timedelta(days=6)
-            return monday, sunday
+            start = _week_start_date(now)
+            if use_next:
+                start = start + timedelta(days=7)
+            end = start + timedelta(days=6)
+            return start, end
 
     if period == "Month":
         if use_next:
@@ -548,8 +560,7 @@ def _is_overdue_by(due: datetime, grace_days: float) -> bool:
 def _period_start(period: str | None, now: datetime) -> datetime:
     """Return the UTC start of the current period (calendar boundary, ignoring anchor day)."""
     if period == "Week":
-        monday = now - timedelta(days=now.weekday())
-        return monday.replace(hour=0, minute=0, second=0, microsecond=0)
+        return _week_start_date(now)
     if period == "Month":
         return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     if period == "Year":
@@ -565,9 +576,8 @@ def _period_end(period: str | None, dt: datetime) -> datetime:
     attributed to the period the task was *due* in, not the day governance ran.
     """
     if period == "Week":
-        # ISO week ends on Sunday; dt.weekday(): 0=Mon … 6=Sun
-        sunday = dt + timedelta(days=6 - dt.weekday())
-        return sunday.replace(hour=23, minute=59, second=0, microsecond=0)
+        end = _week_start_date(dt) + timedelta(days=6)
+        return end.replace(hour=23, minute=59, second=0, microsecond=0)
     if period == "Month":
         last_day = calendar.monthrange(dt.year, dt.month)[1]
         return dt.replace(day=last_day, hour=23, minute=59, second=0, microsecond=0)
@@ -636,6 +646,11 @@ def _create_next_task(
             "Exactly N per period", "At most N per period", "Minimum N per period"
         ):
             n_threshold = int(cadence_n)
+            if cadence_type == "Minimum N per period" and n_threshold < 1:
+                logger.warning(
+                    f"RTD '{def_name}': N Cadence={cadence_n} for 'Minimum N per period' is < 1 — treating as 1."
+                )
+                n_threshold = 1
         else:
             n_threshold = None  # Unlimited — always stay in current period
         if n_threshold is not None:
@@ -881,6 +896,11 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
                     n_threshold = int(cadence_n)
                 else:
                     n_threshold = None
+                if cadence_type == "Minimum N per period" and n_threshold is not None and n_threshold < 1:
+                    logger.warning(
+                        f"RTD '{def_name}': N Cadence={n_threshold} for 'Minimum N per period' is < 1 — treating as 1."
+                    )
+                    n_threshold = 1
                 if n_threshold is not None:
                     # Only completions count — skipped/cancelled tasks are retried,
                     # not treated as consuming the period quota.

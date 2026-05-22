@@ -324,13 +324,22 @@ def main():
 
     poll_interval = cfg.get("poll_interval", 60)
 
+    _WEEK_DAY_MAP = {
+        "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+        "friday": 4, "saturday": 5, "sunday": 6,
+    }
+
     rt_defs_id: str | None = None
     rt_cfg = cfg.get("recurring_tasks", {})
     if rt_cfg.get("enabled"):
         rt_defs_id = rt_cfg.get("definitions_db_id")
         rt_tasks_id = rt_cfg.get("tasks_db_id")
+        week_start_str = str(rt_cfg.get("week_start", "Monday")).lower()
+        week_start_day = _WEEK_DAY_MAP.get(week_start_str, 0)
+        if week_start_str not in _WEEK_DAY_MAP:
+            logger.warning(f"Unknown week_start '{rt_cfg.get('week_start')}' — defaulting to Monday.")
         if rt_defs_id and rt_tasks_id:
-            recurring_tasks.init(rt_defs_id, rt_tasks_id)
+            recurring_tasks.init(rt_defs_id, rt_tasks_id, week_start_day)
         else:
             logger.warning("recurring_tasks enabled but definitions_db_id or tasks_db_id is missing — skipping.")
             rt_defs_id = None
