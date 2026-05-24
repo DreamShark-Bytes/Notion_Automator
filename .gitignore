@@ -1,3 +1,7 @@
+# Scratch / temporary output
+scratch.md
+STATUS.md
+
 # Secrets
 config.toml
 .env

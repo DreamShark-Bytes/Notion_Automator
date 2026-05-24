@@ -1,5 +1,5 @@
 # Notion Automator — Status
-_Last updated: May 22, 2026_
+_Last updated: May 23, 2026_
 
 ## Project Info
 **Version:** v1.0.1
@@ -11,16 +11,14 @@ _Last updated: May 22, 2026_
 _Ordered by importance._
 
 1. bug: daily due date off by 1
-2. bug: field inheritance
-3. **Bug: "Minimum N per period" period transition** — wrong due date on next task when minimum is met; governance should archive (not cancel) when minimum was met. See PLANNED.md.
-4. 4. **Pivot (back) to Notion_PowerBI** — PC required for data connections; iPad exploration only for now.
-5. **Automation Hub** — A single Notion page as the daemon home base: task database configs (checkboxes per flag), recurring tasks config, bot health dashboard. Requires `create_database()` in `notion_api.py`. Unblocks Notifications. (Formerly "Project Page" — see PLANNED.md.)
-6. **Change Tracking** — Opt-in field change log (old/new value, page ID, timestamp). Storage format TBD. Feeds Notion_PowerBI.
-7. **Timer / Mission Tracking** — Link closed tasks to mission areas for effort heatmap. Attribution method not yet decided — see PLANNED.md.
-8. **Notifications** — Discord/Telegram webhooks via `notifiers.py`. Depends on Automation Hub for URL config.
-9. **Clear Blocking/Blocked-By on Close** — confirm exact Notion field names before implementing — see PLANNED.md.
-10. **First Value Field Tracking** — stamp `First [Field Name]` for any configured field — see PLANNED.md.
-11. **Automated Testing** — unit tests for pure logic functions after feature set stabilizes — see PLANNED.md.
+2. **Pivot (back) to Notion_PowerBI** — PC required for data connections; iPad exploration only for now.
+4. **Automation Hub** — A single Notion page as the daemon home base: task database configs (checkboxes per flag), recurring tasks config, bot health dashboard. Requires `create_database()` in `notion_api.py`. Unblocks Notifications. (Formerly "Project Page" — see PLANNED.md.)
+5. **Change Tracking** — Opt-in field change log (old/new value, page ID, timestamp). Storage format TBD. Feeds Notion_PowerBI.
+6. **Timer / Mission Tracking** — Link closed tasks to mission areas for effort heatmap. Attribution method not yet decided — see PLANNED.md.
+7. **Notifications** — Discord/Telegram webhooks via `notifiers.py`. Depends on Automation Hub for URL config.
+8. **Clear Blocking/Blocked-By on Close** — confirm exact Notion field names before implementing — see PLANNED.md.
+9. **First Value Field Tracking** — stamp `First [Field Name]` for any configured field — see PLANNED.md.
+10. **Automated Testing** — unit tests for pure logic functions after feature set stabilizes — see PLANNED.md.
 
 ---
 
@@ -43,9 +41,9 @@ _Only tests from current session or currently pending. Full test history in `tes
 
 | ID  | Description                                                                          | Status              |
 | -----| --------------------------------------------------------------------------------------| ---------------------|
-| P3  | Select/Multi-select fields not copied to new recurring tasks                         | Needs investigation |
+| P3  | Select/Multi-select fields not copied to new recurring tasks                         | Fixed               |
 | P4  | Once-daily Responsibility created task with wrong due date (5/23 instead of 5/22)    | Fixed               |
-| P5  | RTD Grace Period change (1→empty) not reflected in governance despite RTD monitoring | Needs fix           |
+| P5  | RTD Grace Period change (1→empty) not reflected in governance despite RTD monitoring | Fixed               |
 
 ### P3 Notes — field inheritance
 - `FIELDS_NOT_INHERITED` is a blacklist (skip these, copy everything else)
@@ -59,10 +57,10 @@ _Only tests from current session or currently pending. Full test history in `tes
 - Occurrence # = 1 on all tasks (correct for Once per period)
 - Investigate `_calc_due_date` for daily period — possible off-by-one at a day boundary
 
-### P5 Notes — RTD config changes not propagating
-- Governance re-fetches RTDs fresh from Notion API each run — no explicit cache
-- Likely race: Z1 detects change → triggers governance immediately → Notion API hasn't propagated the edit yet → governance runs with old value → snapshot refreshes with new value → next poll sees no change → no second governance run
-- Fix options: (a) add a short delay before governance when triggered by Z1; (b) schedule a follow-up governance run one poll cycle later; (c) re-fetch RTD individually just before using its values in governance
+### P5 Notes — RTD config changes not propagating (Fixed)
+- Root cause: Z1 triggered governance on ANY RTD edit, including Grace Period changes — but governance fired before Notion propagated the edit, so it ran with the old value; snapshot then refreshed with new value; no re-trigger.
+- Fix: `_poll_rtd_for_changes` now triggers governance only when Status transitions to Active. All other field edits update the snapshot only — they take effect at the next scheduled governance run (startup or 2am).
+- Governance drift correction now covers all tasks in current+future periods (not open only), so field changes like Period, Cadence Type, N Cadence fully propagate on the next run.
 
 ---
 
@@ -74,7 +72,7 @@ _Things to file in the repository issue tracker._
 - **`database_ids` removal** — no backward-compatible warning; old config silently errors; could log a helpful message pointing to config_example.toml
 - **P3** — Select/Multi-select fields not copied in recurring task inheritance (not yet filed)
 - **P4** — Once-daily task due date off by one (not yet filed)
-- **P5** — RTD config changes not reflected in governance (not yet filed)
+- **P5** — RTD config changes not reflected in governance (fixed this session — closes #6)
 
 ---
 

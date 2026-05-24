@@ -30,6 +30,7 @@ Notion's built-in automations are powerful but gated behind paid plans and limit
 - [Adding Your Own Automations](#adding-your-own-automations)
 - [Tuning Poll Interval](#tuning-poll-interval)
 - [How it compares to Notion's built-in automations](#how-it-compares-to-notions-built-in-automations)
+- [Usage Guide](#usage-guide)
 - [Updating](#updating)
 - [Future Plans](#future-plans)
 
@@ -288,6 +289,18 @@ Set `poll_interval` in `config.toml` (applies to all databases).
 | Outbound webhooks         | ✅ (add your own code)        | ✅ (paid plans)  |
 | Always-on device required | ✅ (Raspberry Pi works great) | ❌               |
 | Subscription required     | ❌                            | ✅               |
+
+---
+
+## Usage Guide
+
+Tips for configurations that are valid but non-obvious. Useful once you're familiar with the features.
+
+**`Minimum N per period` with Anchor Day:**
+If all N repetitions of an activity happen at the same scheduled event (e.g. a weekly meeting, a class, a practice), `Minimum N per period` is probably not the right cadence. Use `Once per period` with Anchor Day set to that event's day instead. Completing the task means you showed up; how many times you did something *during* the event is detail that belongs in the task name or notes, not in N. `Minimum N per period` is better suited to activities spread across the period with no fixed day.
+
+**Two recurring event days per period (e.g. Tuesday and Thursday):**
+The system supports one Anchor Day per series definition. To track a recurring activity that happens on two specific days per week, create two separate definitions — one anchored to Tuesday, one to Thursday — each with `Once per period`. Using `Minimum 2 per period` with no anchor would give you a due date at end of period but would not enforce the specific days.
 
 ---
 

@@ -57,37 +57,42 @@ if task_type not in {"Habit", "Responsibility", "Bad Habit"}:
 
 ---
 
-## Bug: Field Inheritance for Recurring Tasks
+## Feature: Configurable Field Inheritance for Recurring Tasks
 
-**Status:** Ready to implement (pending P3 root cause investigation)
-**One-liner:** Select, multi-select, and possibly other field types are not being copied to newly created recurring tasks — plus a design improvement to make the inheritance list configurable.
+**Status:** Pre-design (P3 bug fixed; configurable inheritance is an Automation Hub feature)
+**One-liner:** Let users control which fields are inherited when a recurring task is created — inclusive (whitelist) or exclusive (blacklist) — without touching code or config files.
 
-### Bug (P3)
-`_copy_inherited_props()` uses `FIELDS_NOT_INHERITED` as a blacklist. Select/multi-select are not in that list and are not read-only, so they should be copied — but they aren't. Root cause needs investigation before the fix is written. Fields confirmed not copying: Select, Multi-select (priority, effort level, pursuit, area, parent/child). Fields not yet tested: relation, text, checkbox.
+### What was fixed (P3)
+Root cause of inheritance failures was never `_copy_task_fields` logic — fields were being copied correctly. Failures came from API rejections on `create_page`:
+- `files` type properties → Notion API rejects file attachments on create/update. Fixed: added `files` to `_READONLY_PROP_TYPES`.
+- `people` type properties → read format includes full user objects (`name`, `avatar_url`, etc.); write format only accepts `{"id": "..."}`. Fixed: `_copy_task_fields` now strips people entries to ID only.
+- Graceful fallback added: if `create_page` with inherited fields fails, log a WARNING (always visible) with Notion's error message, then retry with bot-managed fields only — task is always created.
 
-### Design improvement — configurable inheritance
+### Configurable inheritance design (Automation Hub)
 
-Replace the module-level `FIELDS_NOT_INHERITED` set with two variables:
+This belongs in the **Automation Hub**, not `config.toml`. Reasoning:
+- Field inheritance is a schema-aware behavioral decision ("I added a column — should it be inherited?").
+- Users should be able to reconfigure without restarting the daemon.
+- `config.toml` is for workspace identity and connectivity (token, DB IDs). Behavioral schema decisions live in Automation Hub.
 
-```python
-fields_inheritance_list_is_inclusive: bool = True
-# True  → inheritance_fields is a WHITELIST (only copy these fields)
-# False → inheritance_fields is a BLACKLIST (copy everything except these)
+Two variables, configured per task database in the Automation Hub:
 
-inheritance_fields: list[str] = []
+```
+Inheritance Mode: Inclusive | Exclusive  (toggle or select)
+Inheritance Fields: [field names]         (text list or multi-select)
 ```
 
-- Boolean flag prevents misconfiguration — it's either inclusive or exclusive, no ambiguity.
-- Default behavior (empty list + inclusive=False) copies all non-bot, non-read-only fields, matching current intent.
-- User can flip to inclusive=True and list exactly which fields to carry forward, ignoring everything else.
-- These become config values in `config.toml` under `[recurring_tasks]`, not hardcoded constants.
+- **Inclusive (whitelist):** only copy fields explicitly listed. Safest — new columns are ignored until opted in.
+- **Exclusive (blacklist):** copy everything except listed fields. Current default behavior.
+
+Hardcoded invariants (`FIELDS_NOT_INHERITED`, `_READONLY_PROP_TYPES`) remain in code regardless of user config — bot-managed fields and API-unwritable types are never inherited.
 
 ### Open questions
-- What is the actual root cause of select/multi-select not copying? (Investigate `_copy_inherited_props` before implementing the redesign.)
-- Should relation fields be copied? They reference other pages by ID — if the related page is valid, copying makes sense. But orphaned relations could cause silent Notion errors.
+- Should "no config set" default to inclusive (safe) or exclusive (current behavior)?
+- Automation Hub implementation is a prerequisite.
 
 ### Dependencies
-- P3 root cause investigation must happen first.
+- Automation Hub must exist before this can be configured at runtime.
 
 ---
 
@@ -187,6 +192,10 @@ A child database (table view) where each row is a task database the bot monitors
 **Section 2: Recurring Tasks**
 A block (or small sub-page) showing the `[recurring_tasks]` config: definitions DB ID, tasks DB ID, enabled toggle. Errors and warnings from governance written here.
 
+Warnings to surface here (currently only logged):
+- **Anchor Day ignored (N>1):** RTD uses "Exactly N per period" or "Minimum N per period" with N>1 and an Anchor Day set — Anchor Day is suppressed. User should clear Anchor Day or set N=1.
+- **"At most N per period" with wrong Task Type:** RTD uses this cadence with a type other than Bad Habit — no due date will be set. User should change Task Type to Bad Habit or change cadence.
+
 **Section 3: Bot Health**
 Last poll time, daemon uptime, most recent governance run. Written on each governance pass (not every poll — too noisy).
 
@@ -200,10 +209,13 @@ Notion does not have a native field-selector property type (the relation/rollup 
 - Bot must read Hub config at startup (after `config.toml`) and merge with or override local flags.
 - Bot must write errors/warnings per-database-row rather than only to logs.
 
+### Config layer ownership (settled)
+- `config.toml` = workspace identity and connectivity (token, DB IDs, Hub page ID, poll interval). Requires restart to change. Not for behavioral decisions.
+- Automation Hub = behavioral and schema-aware config that users adjust without touching files or restarting. Examples: automation flags per database, inheritance mode + field list, First Value Field config, webhook URLs.
+- When Hub config and `config.toml` conflict: Hub takes precedence for flags; `config.toml` required only for IDs and the Hub page ID itself.
+
 ### Open questions
-- Which config values move from `config.toml` to Notion? Proposal: `config.toml` remains the source of truth for IDs and the Hub page ID; all automation flags migrate to Notion so non-technical users can toggle them without editing a file.
 - Status dashboard write frequency: governance runs only (startup + 2am cron) to avoid excessive API writes.
-- When Hub config and `config.toml` conflict, which wins? Proposal: Hub takes precedence for flags; `config.toml` required only for IDs and the Hub page ID itself.
 
 ### Dependencies
 - Automation Hub must exist before Notifications can store webhook URLs there.

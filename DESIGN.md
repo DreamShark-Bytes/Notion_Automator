@@ -436,6 +436,19 @@ If a task's Due Date falls in a past period and the stated Grace Period would ke
 
 Result: at most 2 open tasks simultaneously for at most 1 day. `Period=Day, Grace=9999` cleans up in 1 day. Normal grace period still fires first — if grace expires within the same period, the cap never activates.
 
+**Minimum N per period — stale task handling (cron-only):**
+
+When a "Minimum N per period" task's Due Date falls in a past period, governance checks how many completions occurred in that past period:
+
+- **Minimum not met:** Cancel the task (records the failure). Create a fresh task for the current period using existing task-creation logic.
+- **Minimum met:** Archive the task (`archive_page()`) — not cancel. Cancellation implies failure; archiving removes it silently. Create a fresh task for the current period. The archived task is used as the field inheritance source for the replacement.
+
+Archive rather than cancel is used because cancellation triggers `auto_recurring_tasks` and implies the user failed. Archiving removes the page from `query_database` results immediately, allowing the standard duplicate guard and task-creation flow to run cleanly. Creating fresh (rather than patching the stale task's Due Date) avoids incrementing Due Date Update Count.
+
+**Minimum N per period — completion trigger behavior:**
+
+When a "Minimum N per period" task is closed, the bot always creates the next task in the **current period**, regardless of how many completions have occurred. Reaching N does not close the period — more completions are always welcome. The period only advances at the cron (when the calendar period ends).
+
 #### Bot re-trigger prevention
 
 When the bot cancels a task or creates a new one, the Notion API updates `last_edited_time` on the affected pages. These pages will reappear in the next poll. Re-triggering is prevented by the in-memory snapshot: after processing, the snapshot stores the post-update state. On the next poll, `prev_group == current_group == Complete` — no transition detected, no trigger.
@@ -695,10 +708,10 @@ Resolved design decisions. Each entry states the rule and the reason so future c
 - Implementation: at the end of `auto_recurring_tasks`, for any initialized non-Complete task, the expected target is computed from the live RTD and compared to the task's current field value. If they differ, the field is updated in the same poll cycle.
 - **Limitation:** the RTD database is not in the `database_ids` poll list — the daemon does not watch RTD pages for changes. Period Target sync fires the next time the *task itself* is edited, or at daemon restart (init pass). If the RTD changes but no task edits occur, the sync is delayed until one of those triggers. This is an acceptable trade-off — RTD config changes are infrequent and the drift is cosmetic only.
 
-**[Period field change] Changing the `Period` field on an RTD mid-series is unsupported and leaves Period Key in the old format until correction.**
-- Example: if the Period is changed from `Week` to `Month`, existing open tasks still have a `Period Key (Recurring Task)` in `YYYY-WNN` format. The next task created by the bot will use the new `Month` format, creating a format mismatch in the series history.
-- The 2am cron governance pass does not reformat old Period Keys on existing tasks. The mismatch is harmless for reporting purposes (all keys are stored as text) but period boundary detection may be unreliable for that series until a full period rolls over.
-- Recommended practice: complete or cancel all open tasks in a series before changing the Period field on the RTD. Changing period granularity mid-series (e.g. Day → Week) is unusual and not a supported workflow.
+**[Period field change] Changing `Period`, `Cadence Type`, or `N Cadence` on an RTD mid-series takes effect on the next governance run.**
+- Governance drift-corrects Period Key, Occurrence #, and Period Target on all tasks in the current and future periods on every pass. An RTD config change is fully reflected after the next startup, 2am cron, or RTD activation trigger — no `--reconcile` needed for current/future tasks.
+- Historical closed tasks (periods before the current period) are not corrected by normal governance. Use `--reconcile` if historical records also need correction.
+- Due Dates on existing open tasks are not rewritten — only newly created tasks get Due Dates computed from the new settings. An open task may retain a Due Date from the old period granularity; it will close normally and the replacement task will have the correct Due Date.
 
 **[Instance #] Assigned by COUNT of existing tasks, not MAX+1.**
 - Reason: MAX+1 creates gaps or inflated numbers if a user edits Instance # values directly. COUNT of related tasks for this RTD in the current period is resilient to user edits — the value of Instance # on existing tasks is irrelevant, only the count matters.
@@ -780,11 +793,19 @@ Resolved design decisions. Each entry states the rule and the reason so future c
 - Constants: `RTD_STATUS_FIELD = "Status"`, `RTD_ACTIVE_STATUS = "Active"` in `recurring_tasks.py`.
 - No destructive action on open tasks when an RTD goes inactive — least-destructive-intervention principle. Open tasks remain; user closes them when ready.
 
-**[RTD Monitoring / Z1] The RTD database is polled in the main loop for change detection.**
+**[RTD Monitoring / Z1] The RTD database is polled in the main loop; governance triggers only when an RTD is activated.**
 - Problem: governance only ran at startup and 2am. A new RTD or an RTD toggled to Active mid-session got no task until the next governance pass.
-- Fix: `_poll_rtd_for_changes()` runs each loop iteration (same interval as task DB polls). Any detected change triggers `run_governance()` immediately. Governance already handles all cases correctly — no changes to `recurring_tasks.py`.
-- After governance fires (whether from RTD change or 2am cron), the RTD snapshot is fully refreshed from the API. This ensures bot-written Bot Notes become the new baseline and do not re-trigger governance on the next poll.
+- Fix: `_poll_rtd_for_changes()` runs each loop iteration (same interval as task DB polls). It triggers `run_governance()` only when an RTD's Status transitions to Active (including newly created RTDs already set to Active). Other field changes (Grace Period, N Cadence, Anchor Time, etc.) update the snapshot but do not trigger governance — they take effect at the next scheduled governance run.
+- Rationale for trigger scope: field changes like Grace Period do not require an immediate governance run; triggering on every RTD edit caused spurious governance runs and race conditions where governance fired before Notion propagated the edit.
+- After governance fires (whether from RTD activation or 2am cron), the RTD snapshot is fully refreshed from the API. This ensures bot-written Bot Notes become the new baseline and do not re-trigger governance on the next poll.
 - `rt_defs_id` is hoisted to function scope so the poll loop can access it regardless of whether recurring tasks were fully initialized.
+
+**[Governance drift correction scope] Normal governance corrects Period Key, Occurrence #, and Period Target on all tasks in the current and future periods — not open tasks only.**
+- Rationale: correcting only open tasks left closed tasks in the current period with stale fields after an RTD config change (e.g. Period changed from Daily to Weekly). The next governance pass now fixes all current+future tasks regardless of status.
+- Occurrence # uses oldest-first sort (by Closed Date if set, else Due Date; no-date tasks last) starting at 1, incrementing only for non-cancelled tasks. Cancelled tasks share the slot number of the next non-cancelled task (same slot = failed attempt at that occurrence).
+- Historical periods (period key < current period key) are not touched by normal governance. Use `--reconcile` to correct historical records.
+- Tasks cancelled in the current governance pass are treated as cancelled for Occurrence # purposes (via the `cancelled_ids` set) even though `all_tasks` still shows them as open.
+- `--reconcile` remains for force-writing all periods including history; normal governance is drift-only (writes only when value has changed).
 
 **[week_start] The first day of the week is configurable via `week_start` in `config.toml`.**
 - Default: `"Monday"` (ISO week, unchanged behavior). Accepts any full day name ("Monday"–"Sunday").

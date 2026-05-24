@@ -29,7 +29,7 @@ import recurring_tasks
 from recurring_tasks import BOT_CREATED_PAGES_KEY
 
 VERSION = "1.0.1"
-NOTION_API_MIN_VERSION = "1.0.1"
+NOTION_API_MIN_VERSION = "1.1.0"
 
 parser = argparse.ArgumentParser(description="Notion automation daemon")
 parser.add_argument(
@@ -46,6 +46,11 @@ parser.add_argument(
     "--governance-only",
     action="store_true",
     help="Run the automations init pass and GOVERNANCE functions once, then exit",
+)
+parser.add_argument(
+    "--reconcile",
+    action="store_true",
+    help="Force-write Period Key, Occurrence #, and Period Target on all open recurring tasks, then exit. Use after changing RTD config during testing.",
 )
 args = parser.parse_args()
 
@@ -274,8 +279,11 @@ def _poll_rtd_for_changes(
     client: NotionClient, rt_defs_id: str, rtd_snapshot: dict[str, dict], since: str
 ) -> tuple[dict[str, dict], bool]:
     """
-    Poll the RTD database for changes since `since`. No automations run on RTD pages —
-    this is purely for change detection. Returns (updated_snapshot, changed).
+    Poll the RTD database for changes since `since`. Returns (updated_snapshot, should_govern)
+    where should_govern is True only when an RTD's Status has toggled to Active — the only
+    change that requires immediate governance. All other field edits (Grace Period, N Cadence,
+    Anchor Time, etc.) update the snapshot but do not trigger governance; they take effect on
+    the next scheduled governance run. New RTDs created already set to Active also trigger.
     """
     filter_payload = {
         "timestamp": "last_edited_time",
@@ -290,8 +298,11 @@ def _poll_rtd_for_changes(
     if not pages:
         return rtd_snapshot, False
 
+    def _rtd_status(page: dict) -> str:
+        return (page.get("properties", {}).get("Status", {}).get("status", {}) or {}).get("name", "")
+
     new_snapshot = dict(rtd_snapshot)
-    changed = False
+    should_govern = False
     for page in pages:
         stripped = _strip_files(page)
         prev = rtd_snapshot.get(page["id"])
@@ -300,11 +311,19 @@ def _poll_rtd_for_changes(
                 and stripped == prev):
             new_snapshot[page["id"]] = stripped
             continue  # boundary overlap — truly unchanged
-        new_snapshot[page["id"]] = stripped
-        changed = True
-        logger.info(f"RTD change detected on page {page['id']} — will trigger governance.")
 
-    return new_snapshot, changed
+        new_snapshot[page["id"]] = stripped
+        new_status = _rtd_status(stripped)
+        old_status = _rtd_status(prev) if prev is not None else None
+
+        if new_status == "Active" and old_status != "Active":
+            label = "new" if prev is None else "existing"
+            logger.info(f"RTD {page['id']} ({label} RTD): Status → Active — triggering governance.")
+            should_govern = True
+        else:
+            logger.info(f"RTD {page['id']} changed (Status={new_status!r}, unchanged) — snapshot updated, no governance trigger.")
+
+    return new_snapshot, should_govern
 
 
 def main():
@@ -374,9 +393,19 @@ def main():
     }
 
     # GOVERNANCE functions (startup pass — also runs daily at 2am via cron below).
+    # --reconcile sets flags before this single governance run so no second pass is needed.
+    if args.reconcile:
+        logger.info("--reconcile flag set: retroactively writing Period Key, Occurrence #, and Period Target on all recurring tasks (task creation skipped).")
+        recurring_tasks.set_reconcile_flags(period_key=True, period_target=True, occurrence_number=True)
+
+    gov_created = run_governance(client)
+    recurring_tasks.set_reconcile_flags()  # reset (no-op if flags were never set)
+
+    if args.reconcile:
+        return
+
     # Run init pass on any pages created by governance so their fields (Reopen Count,
     # Due Date Update Count, etc.) are populated immediately, not deferred to the next poll.
-    gov_created = run_governance(client)
     if gov_created:
         _init_pass_on_pages(client, gov_created, snapshots)
 
@@ -432,15 +461,14 @@ def main():
                 except Exception as e:
                     logger.error(f"Failed to refresh RTD snapshot after 2am governance: {e}")
 
-        # RTD change detection — triggers governance when any RTD is added or modified.
+        # RTD change detection — triggers governance only when an RTD is activated.
         if rt_defs_id and last_polled_rtd is not None:
             rtd_poll_start = _utcnow_iso()
-            rtd_snapshot, rtd_changed = _poll_rtd_for_changes(
+            rtd_snapshot, rtd_activated = _poll_rtd_for_changes(
                 client, rt_defs_id, rtd_snapshot, last_polled_rtd
             )
             last_polled_rtd = rtd_poll_start
-            if rtd_changed:
-                logger.info("RTD changes detected — running governance.")
+            if rtd_activated:
                 gov_created = run_governance(client)
                 if gov_created:
                     _init_pass_on_pages(client, gov_created, snapshots)
