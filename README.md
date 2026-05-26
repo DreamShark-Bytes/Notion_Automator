@@ -55,12 +55,30 @@ The database ID is the UUID between your workspace name and `?v=`. Copy it witho
 
 ### 3. Install
 
+**Linux (Raspberry Pi / Debian / Ubuntu) — install system dependencies if not already present:**
+```bash
+sudo apt update && sudo apt install -y python3 python3-venv git
+```
+
 ```bash
 git clone https://github.com/DreamShark-Bytes/Notion_Automator
 cd Notion_Automator
 
 python3 -m venv venv
 venv/bin/pip install -r requirements.txt
+```
+
+**Windows — install Python if not already present:**
+
+1. Download Python 3.11+ from [python.org](https://www.python.org/downloads/) — check **"Add Python to PATH"** during install
+2. (Optional) Install Git from [git-scm.com](https://git-scm.com/) to clone via terminal, or download the repo as a ZIP
+
+```powershell
+git clone https://github.com/DreamShark-Bytes/Notion_Automator
+cd Notion_Automator
+
+python -m venv venv
+venv\Scripts\pip install -r requirements.txt
 ```
 
 `requirements.txt` includes the pinned [Notion_API](https://github.com/DreamShark-Bytes/Notion_API) dependency — no separate install step needed.
@@ -73,9 +91,16 @@ venv/bin/pip install -r requirements.txt
 
 ### 4. Configure
 
+**Linux:**
 ```bash
 cp config_example.toml config.toml
 nano config.toml
+```
+
+**Windows:**
+```powershell
+copy config_example.toml config.toml
+notepad config.toml
 ```
 
 At minimum, set your integration token and add one `[[databases]]` block for each database you want to automate:
@@ -91,13 +116,21 @@ Enable individual features per database by adding flags to the block. See each f
 
 ### 5. Test It
 
+**Linux:**
 ```bash
 venv/bin/python daemon.py
+```
+
+**Windows:**
+```powershell
+venv\Scripts\python daemon.py
 ```
 
 You should see polling logs every 60 seconds. Make a change in Notion and watch it react.
 
 ### 6. Run as a System Service (auto-start on boot)
+
+#### Linux — systemd
 
 Edit the service file **before** copying it — replace both placeholder values:
 
@@ -118,6 +151,35 @@ sudo systemctl start notion-daemon
 sudo systemctl status notion-daemon
 journalctl -u notion-daemon -f
 ```
+
+#### Windows — NSSM
+
+[NSSM](https://nssm.cc/) (Non-Sucking Service Manager) wraps the daemon as a proper Windows service — auto-starts on boot, restarts on failure, runs while locked.
+
+1. Download NSSM from [nssm.cc/download](https://nssm.cc/download) — extract and put `nssm.exe` somewhere permanent (e.g. `C:\Tools\nssm.exe`)
+
+2. Open **Command Prompt as Administrator** and run (replace the path with your actual project location):
+
+```cmd
+C:\Tools\nssm.exe install NotionAutomator "C:\Users\YOUR_USER\Documents\Notion_Automator\venv\Scripts\python.exe" "daemon.py"
+C:\Tools\nssm.exe set NotionAutomator AppDirectory "C:\Users\YOUR_USER\Documents\Notion_Automator"
+C:\Tools\nssm.exe set NotionAutomator DisplayName "Notion Automator"
+C:\Tools\nssm.exe set NotionAutomator Description "Notion automation daemon"
+C:\Tools\nssm.exe set NotionAutomator Start SERVICE_AUTO_START
+C:\Tools\nssm.exe start NotionAutomator
+```
+
+3. Manage the service:
+
+```cmd
+sc start NotionAutomator
+sc stop NotionAutomator
+sc query NotionAutomator
+```
+
+Or open **services.msc** and find **Notion Automator** in the list.
+
+Logs are written to `notion_daemon.log` in the project directory.
 
 ---
 
@@ -301,6 +363,40 @@ If all N repetitions of an activity happen at the same scheduled event (e.g. a w
 
 **Two recurring event days per period (e.g. Tuesday and Thursday):**
 The system supports one Anchor Day per series definition. To track a recurring activity that happens on two specific days per week, create two separate definitions — one anchored to Tuesday, one to Thursday — each with `Once per period`. Using `Minimum 2 per period` with no anchor would give you a due date at end of period but would not enforce the specific days.
+
+**Visual status indicator (formula field):**
+Add a formula field to your task database to see task state at a glance. The formula below concatenates emoji based on task properties — useful as a first column in your board or list view.
+
+Emoji key: ⏰ past due · 🧱 is blocking a task · 🛑 is blocked · 🔁 recurring task · 🤖 has bot note
+
+```
+if(
+    and(
+        prop("Status") != "Done",
+        prop("Status") != "Cancelled"
+    ),
+    if(
+        not empty(prop("Due Date")),
+        if(
+            or(
+                and(test(format(prop("Due Date")), "AM|PM"), prop("Due Date") < now()),
+                and(not test(format(prop("Due Date")), "AM|PM"), dateAdd(prop("Due Date"), 1, "days") < now())
+            ),
+            "⏰",
+            ""
+        ),
+        ""
+    ),
+    ""
+) + if(not empty(prop("Blocking ")), "🧱", "")
+  + if(not empty(prop("Blocked by")), "🛑", "")
+  + if(not empty(prop("Recurring Series")), "🔁", "")
+  + if(not empty(prop("Bot Notes")), "🤖", "")
+```
+
+Field names must match exactly — including the trailing space in `"Blocking "`. If your field names differ, update the formula accordingly. The overdue check handles both date-only and date+time fields: date+time compares directly to `now()`; date-only adds one day since a date with no time represents the whole day.
+
+Note: Notion evaluates all branches of `and()`/`or()` — there is no short-circuit evaluation. Design formulas accordingly.
 
 ---
 

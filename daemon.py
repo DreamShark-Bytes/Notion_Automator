@@ -11,7 +11,7 @@ import sys
 import time
 import logging
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timezone, time as dtime
 
 try:
     import tomllib
@@ -357,6 +357,10 @@ def main():
         week_start_day = _WEEK_DAY_MAP.get(week_start_str, 0)
         if week_start_str not in _WEEK_DAY_MAP:
             logger.warning(f"Unknown week_start '{rt_cfg.get('week_start')}' — defaulting to Monday.")
+        governance_hour = int(rt_cfg.get("governance_hour", 2))
+        if not 0 <= governance_hour <= 23:
+            logger.warning(f"governance_hour {governance_hour} is out of range (0–23) — defaulting to 2.")
+            governance_hour = 2
         if rt_defs_id and rt_tasks_id:
             recurring_tasks.init(rt_defs_id, rt_tasks_id, week_start_day)
         else:
@@ -367,7 +371,7 @@ def main():
 
     api_version = getattr(_notion_api, "__version__", None)
     if api_version is None:
-        logger.warning("Notion_API version unknown — run: venv/bin/pip install -r requirements.txt")
+        logger.warning("Notion_API version unknown — run: pip install -r requirements.txt")
     else:
         logger.info(f"Notion Automator v{VERSION} | Notion API v{api_version}")
         min_tuple = tuple(int(x) for x in NOTION_API_MIN_VERSION.split("."))
@@ -375,7 +379,7 @@ def main():
         if installed_tuple < min_tuple:
             logger.warning(
                 f"Notion_API v{api_version} is below minimum v{NOTION_API_MIN_VERSION}"
-                f" — run: venv/bin/pip install -r requirements.txt"
+                f" — run: pip install -r requirements.txt"
             )
 
 
@@ -445,9 +449,10 @@ def main():
     while True:
         # 2am daily GOVERNANCE cron
         now_local = datetime.now()
-        if now_local.hour == 2 and last_governance_date != now_local.date():
+        governance_time_today = datetime.combine(now_local.date(), dtime(governance_hour, 0))
+        if now_local >= governance_time_today and last_governance_date != now_local.date():
             last_governance_date = now_local.date()
-            logger.info("2am cron: running GOVERNANCE functions.")
+            logger.info(f"{governance_hour:02d}:00 cron: running GOVERNANCE functions.")
             gov_created = run_governance(client)
             if gov_created:
                 _init_pass_on_pages(client, gov_created, snapshots)

@@ -5,6 +5,44 @@ Living design document. Sections are deleted when a feature is implemented and i
 ---
 
 
+## Improvement: Governance Schema Validation
+
+**Status:** Pre-design
+**One-liner:** At each governance run, validate that RTD fields and bot-expected task table fields have the correct Notion property types and (for select/status fields) the expected option values. Warn and continue — daemon never stops over a schema mismatch.
+
+### What gets validated
+
+**RTD database fields:**
+| Field | Expected Type | Value check |
+|---|---|---|
+| Type | select | Options must be a subset of {"Habit", "Responsibility", "Bad Habit"} — warn on any unrecognized value present |
+| Cadence Type | select | Options must be a subset of the known cadence type set — warn on any unrecognized value |
+| Period | select | Options must be a subset of the known period set — warn on any unrecognized value |
+| Status | status | Must include "Active" as an option |
+| N Cadence | number | — |
+| Anchor Day | number | — |
+| Grace Period | number | — |
+| Anchor Time | rich_text | Format check (HH:MM) already warned in _calc_due_date — reference here for completeness |
+
+**Task table fields (bot-managed):**
+| Field | Expected Type |
+|---|---|
+| Ignore Grace Period | checkbox |
+| Occurrence # (Recurring Task) | number |
+| Period Key (Recurring Task) | rich_text or text |
+| Period Target (Recurring Task) | rich_text or text |
+
+### Behavior
+- Runs at the top of each governance run (daily cron + startup) — not just once at startup.
+- Warn and continue — daemon never halts over a schema issue.
+- Until Hub exists: log WARNING only.
+- When Hub exists: also write to Hub Section 2 "Errors & Warnings" for RTD warnings; Hub Section 1 "Errors & Warnings" for task table warnings.
+
+### Dependencies
+- Automation Hub for surfacing warnings visibly. Log-only until then.
+
+---
+
 ## Improvement: Schema-Check Safety Net in automations.py
 
 **Status:** Ready to implement
@@ -21,9 +59,11 @@ Currently, if a config flag is `true` but the field is missing from Notion, the 
 - At automation startup (or governance), load the task DB schema into a set (already done in `recurring_tasks.py` via `_load_task_db_schema` — expose or share this)
 - Before each property write in an automation, check if the field name is in the schema
 - If missing: `logger.error(f"Field '{field}' not found in database schema — skipping write. Check your Notion setup.")` and skip that field only
+- **Hub integration:** until Hub exists, log-only. When Hub is available, also write the error to the "Errors & Warnings" column for the affected database row in Section 1. Every Hub-writing code path must check Hub availability first.
 
 ### Dependencies
 - `_task_db_properties` is currently private to `recurring_tasks.py` — either expose it or replicate the schema-loading pattern in `automations.py`.
+- Hub integration requires Automation Hub to be implemented and `hub_page_id` to be configured.
 
 ---
 
@@ -52,8 +92,11 @@ if task_type not in {"Habit", "Responsibility", "Bad Habit"}:
     task_type = "Habit"
 ```
 
+**Hub integration:** the "unknown Type → defaulting to Habit" warning should surface in Hub Section 2 (Recurring Tasks) alongside the existing Anchor Day N>1 and "At most N wrong type" entries. Section 2 needs an "Errors & Warnings" sub-field for RTD-level warnings.
+
 ### Dependencies
 - None. Isolated to `recurring_tasks.py`.
+- Hub integration for surfacing warnings requires Automation Hub.
 
 ---
 
@@ -96,69 +139,6 @@ Hardcoded invariants (`FIELDS_NOT_INHERITED`, `_READONLY_PROP_TYPES`) remain in 
 
 ---
 
-## Bug: "Minimum N per period" period transition behavior
-
-**Status:** Ready to implement
-**One-liner:** Two wrong behaviors when a Minimum N per period series crosses a period boundary — tasks advance to next period too early, and stale-period cleanup uses Cancel when it shouldn't.
-
-### Decisions made
-
-**During-period behavior (on task close):**
-- When Occurrence # reaches N (minimum met), create the next task with the **current period's** due date, not the next period's. Minimum means more completions are still welcome; the period should stay open.
-- When Occurrence # is below N, behavior is unchanged — create next task for the same period as before.
-
-**Stale-period governance (due date has passed, period has rolled over):**
-- **Minimum NOT met:** Cancel the open task (records the failure). Create a fresh task for the new period.
-- **Minimum WAS met:** Archive (delete via API) the open task — do NOT cancel, as cancellation implies failure. Create a fresh task for the new period. Creating fresh rather than updating Due Date on the existing task prevents Due Date Update Count from firing. Standard duplicate guard applies.
-
-**On recording missed completions as phantom cancelled tasks:** Not worth implementing. Occurrence # on the cancelled task already captures how many were completed — the gap to N is inferable without polluting the database.
-
-### Open questions
-- Does `notion_api.py` already support archiving a page (`PATCH /pages/{id}` with `{"archived": true}`)? Likely needs a new method or a flag on `update_page`. Verify before implementing.
-
-### Dependencies
-- None. Isolated to `recurring_tasks.py`.
-
----
-
-## Change Tracking
-
-**Status:** Pre-design
-**One-liner:** Opt-in field change monitoring — every detected change logged with old value, new value, page ID, and timestamp for reporting via Notion_PowerBI.
-
-### Decisions made so far
-- Opt-in by default — no fields tracked unless explicitly configured. Prevents accidental capture of large or sensitive fields.
-- Excluded field types: `files`, `rich_text` above a configurable length threshold — too large and too noisy.
-- Local storage preferred over a Notion database — avoids API overhead on every change event.
-- Change tracking reads from the in-memory snapshot (already held for change detection) — no extra API calls needed.
-
-### Proposed config
-```toml
-[change_tracking]
-enabled = true
-fields = ["Status", "Due Date", "Assignee"]  # opt-in list
-```
-
-### Proposed record schema
-| Field | Description |
-|---|---|
-| `timestamp` | UTC time the change was detected |
-| `page_id` | Notion page ID |
-| `database_id` | Notion database the page belongs to |
-| `field_name` | Property name that changed |
-| `old_value` | Previous value (serialized) |
-| `new_value` | New value (serialized) |
-
-### Open questions
-- Storage format: SQLite vs. CSV/JSONL append log vs. dedicated Notion database. Local preferred — needs a decision.
-- How does Notion_PowerBI consume the log? Pull from file, or does Notion_Automator push to a shared location?
-- Maximum retention / rotation policy?
-
-### Dependencies
-- Storage decision must happen before implementation.
-- Notion_PowerBI integration design should inform the storage format choice.
-
----
 
 ## Automation Hub (formerly "Project Page")
 
@@ -173,46 +153,86 @@ fields = ["Status", "Due Date", "Assignee"]  # opt-in list
 - Notion page IDs are permanent — users can move the Hub page anywhere after initial creation.
 - Preference: automatic setup with a clear startup log of what was created.
 - **Single hub for all automations** — not a page-per-database. All task database configs and recurring task config live here together, mirroring the structure of `config.toml`.
+- **Optional — graceful degradation:** if `hub_page_id` is absent from `config.toml`, all Hub features degrade gracefully: errors and warnings are log-only, no Hub writes occur. Every Hub-writing code path must check Hub availability before writing. This allows the daemon to run without a Hub configured.
+- **Field name parsing (all text-list fields):** Hub text fields that accept field name lists (First Value Fields, Update Count Fields, Inheritance Fields) are parsed as CSV with: strip leading/trailing whitespace per token, case-insensitive match against the database schema, support double-quoted names for fields whose names contain commas.
+- **Recurring Series type validation warning (Section 2):** if an RTD's cadence type is incompatible with its Task Type (e.g., "At most N per period" with Task Type ≠ "Bad Habit"), surface the warning in Hub Section 2 "Errors & Warnings". This extends the existing Anchor Day N>1 and "At most N wrong type" warning entries already planned for Section 2.
 
 ### Layout concept (mirrors config.toml structure)
 
 **Section 1: Task Databases**
 A child database (table view) where each row is a task database the bot monitors.
 
-| Column                | Type      | Notes                                                             |
-| -----------------------| -----------| -------------------------------------------------------------------|
-| Name                  | Title     | Human-readable label                                              |
-| Database ID           | Text      | Notion database ID                                                |
-| Closed Date           | Checkbox  | Enables closed date stamping                                      |
-| Reopen Count          | Checkbox  | Enables reopen count tracking                                     |
-| Due Date Update Count | Checkbox  | Enables due date change counter                                   |
-| First Value Fields    | Text      | Comma-separated list of fields to track (e.g. "Due Date, Status") |
-| Errors & Warnings     | Rich Text | Bot-written; cleared when resolved                                |
+| Column               | Type      | Notes                                                                                      |
+| ---------------------| ----------| -------------------------------------------------------------------------------------------|
+| Name                 | Title     | Human-readable label                                                                       |
+| Database ID          | Text      | Notion database ID                                                                         |
+| Closed Date          | Checkbox  | Enables closed date stamping                                                               |
+| Reopen Count         | Checkbox  | Enables reopen count tracking                                                              |
+| Update Count Fields  | Text      | Comma-separated fields to count updates for (e.g. "Due Date"). Replaces `due_date_update_count`. |
+| First Value Fields   | Text      | Comma-separated fields to snapshot on first observation (e.g. "Due Date, Closed Date, Status") |
+| Inheritance Mode     | Select    | Inclusive (whitelist) or Exclusive (blacklist). Default: Exclusive (current behavior).     |
+| Inheritance Fields   | Text      | Comma-separated fields for the selected inheritance mode.                                  |
+| Errors & Warnings    | Rich Text | Bot-written; cleared when resolved                                                         |
 
 **Section 2: Recurring Tasks**
-A block (or small sub-page) showing the `[recurring_tasks]` config: definitions DB ID, tasks DB ID, enabled toggle. Errors and warnings from governance written here.
+A block (or small sub-page) showing the `[recurring_tasks]` config: definitions DB ID, tasks DB ID, enabled toggle. Errors and warnings from governance written here in an "Errors & Warnings" rich-text sub-field. Bot clears it when the issue resolves; user clears it to acknowledge.
 
 Warnings to surface here (currently only logged):
 - **Anchor Day ignored (N>1):** RTD uses "Exactly N per period" or "Minimum N per period" with N>1 and an Anchor Day set — Anchor Day is suppressed. User should clear Anchor Day or set N=1.
 - **"At most N per period" with wrong Task Type:** RTD uses this cadence with a type other than Bad Habit — no due date will be set. User should change Task Type to Bad Habit or change cadence.
+- **Unknown Task Type:** RTD Type field is empty or unrecognized — defaulting to Habit. User should set a valid Type: Habit, Responsibility, or Bad Habit.
 
 **Section 3: Bot Health**
 Last poll time, daemon uptime, most recent governance run. Written on each governance pass (not every poll — too noisy).
 
-Activity counters are a back-burner idea here. Useful candidates: total recurring tasks created (lifetime), closed date stamps per period. Risk: every increment is an API write, which adds up quickly at poll frequency. Preferred approach: derive counters from the Change Tracking log (already planned) rather than maintaining them independently — log is source of truth, Hub surfaces the summary. Do not implement until Change Tracking exists.
+Activity counters are a back-burner idea here. Useful candidates: total recurring tasks created (lifetime), closed date stamps per period. Risk: every increment is an API write, which adds up quickly at poll frequency. Preferred approach: derive counters from the Notion_Analytics data pipeline rather than maintaining them independently in the Hub. Do not implement until Notion_Analytics integration is further along.
 
 ### On "selectable field" for First Value Field tracking
 Notion does not have a native field-selector property type (the relation/rollup selector in the UI is not exposed as a reusable property). The closest approximation: a text field where the user types the field name manually. This is consistent with how `first_value_fields` works in `config.toml`. A dedicated child database (one row per tracked field, with a relation back to the Task Databases table) is possible but likely over-engineered for v1.
+
+### RTD database setup (via create_database)
+
+`create_database()` can also be used to scaffold a new RTD database, not just Hub sub-databases. Useful for first-time setup.
+
+**Bot creates automatically:**
+All non-formula/non-rollup fields: Type (select, pre-populated options), Cadence Type (select), Period (select), Status (status with "Active"), N Cadence (number), Anchor Day (number), Grace Period (number), Anchor Time (rich_text), plus the relation field pointing to the task database. Each field is created with a description (Notion API supports property descriptions) so the database is self-documenting out of the box.
+
+**RTD field descriptions (to include in create_database call):**
+| Field | Description |
+|---|---|
+| Type | Governs task behavior. Habit = repeats whether done or not; Responsibility = repeats only when completed; Bad Habit = tracks things to limit (use with "At most N per period"). |
+| Cadence Type | How tasks recur per period. "Exactly N" = strict count; "Minimum N" = at least N, more welcome; "At most N" = cap, Bad Habit only. |
+| Period | The recurring cycle length (Daily, Weekly, Monthly, etc.). |
+| N Cadence | Tasks to create per period. Leave blank for 1. |
+| Anchor Day | Day to anchor the due date (1=Mon … 7=Sun for weekly; day of month for monthly). Leave blank for end-of-period. |
+| Anchor Time | Due time in HH:MM (24-hour). Leave blank for no specific time. |
+| Grace Period | Days after due date before the bot cancels an incomplete task. Leave blank to cancel on the due date. |
+| Status | Set to Active to enable governance for this definition. |
+
+**User completes manually (bot provides instructions):**
+- "Is Open" formula on the task table — syntax depends on the user's Status field option names, so cannot be auto-generated reliably
+- Open Task Count rollup on the RTD — requires the two-way relation and "Is Open" formula to exist first. Bot outputs the formula syntax and rollup config as a guide.
+- Bot adds the new RTD database ID to `config.toml` automatically after creation.
+
+**The two-way relation** between RTD and task table is required for the rollup. Notion API can create the relation field on the RTD side; the reverse field on the task table side is added by Notion automatically if the relation is set as two-way.
 
 ### Required code additions
 - `create_database(parent_page_id, title, properties)` — to be added to `notion_api.py`.
 - Bot must read Hub config at startup (after `config.toml`) and merge with or override local flags.
 - Bot must write errors/warnings per-database-row rather than only to logs.
+- Hub availability check: every Hub-writing path must check that Hub is configured and reachable. If not: log-only, no write attempted.
 
 ### Config layer ownership (settled)
 - `config.toml` = workspace identity and connectivity (token, DB IDs, Hub page ID, poll interval). Requires restart to change. Not for behavioral decisions.
 - Automation Hub = behavioral and schema-aware config that users adjust without touching files or restarting. Examples: automation flags per database, inheritance mode + field list, First Value Field config, webhook URLs.
 - When Hub config and `config.toml` conflict: Hub takes precedence for flags; `config.toml` required only for IDs and the Hub page ID itself.
+
+### README additions (pending)
+- **Status Icon formula** — add to README Usage Guide as a "visual status indicator" callout. Formula uses Bot Notes field, Recurring Series relation, Blocking/Blocked By relations to show concatenated emoji at a glance (overdue, recurring, blocked, blocking, has bot note). Formula text to be inserted once confirmed. Note: formula references bot-managed fields so it's directly relevant to automator users.
+- **Notion Tips callout** — Status Icon formula is the one tip tightly coupled to bot behavior; other tips (Task Creation Hub, button fields, parent/child buttons) belong in a separate personal Notion page, not the README.
+
+### Deliverables
+- `docs/recurring-task-usage-guide.md` — Notion-importable markdown guide for recurring task configuration. Self-contained; no links to code or version-specific internals. Avoid heavy table use (Notion markdown import renders tables inconsistently). Scope: how to configure your first RTD, common patterns, non-obvious behaviors. Distinct from the README Usage Guide (which is for technical readers of the tool docs).
 
 ### Open questions
 - Status dashboard write frequency: governance runs only (startup + 2am cron) to avoid excessive API writes.
@@ -253,7 +273,7 @@ Notion does not have a native field-selector property type (the relation/rollup 
 
 - Clear both "Blocking" and "Blocked By" on close.
 - If the relation is two-way synced in Notion (standard setup), clearing "Blocking" is sufficient — Notion automatically clears the corresponding "Blocked By" entries on the other tasks. Clearing both defensively is still fine and covers the one-way case.
-- No historical preservation of the blocking relationship in this feature. Historical relation changes are covered by Change Tracking (relational fields are eligible for opt-in tracking there).
+- No historical preservation of the blocking relationship in this feature.
 - Trigger: same Done-group transition check used by `auto_closed_date`. No new transition detection needed.
 
 ### Open questions
@@ -275,10 +295,11 @@ Notion does not have a native field-selector property type (the relation/rollup 
 - **Config:** replaces `due_date_tracking` with two independent flags:
   ```toml
   [[databases]]
-  due_date_update_count = true          # existing counter behavior
-  first_value_fields    = ["Due Date", "Status"]   # new — list of fields to track
+  update_count_fields = ["Due Date"]                        # replaces due_date_update_count
+  first_value_fields  = ["Due Date", "Closed Date", "Status"]  # list of fields to snapshot
   ```
-  Bot looks for `First Due Date`, `First Status`, etc. in the database schema. Missing columns are skipped silently.
+  Bot looks for `First Due Date`, `First Closed Date`, `First Status`, etc. in the database schema. Missing columns are skipped silently. "Closed Date" is a useful example — "First Closed Date" captures the first time a task was ever completed.
+- **`update_count_fields` replaces `due_date_update_count`:** old boolean key kept with a deprecation warning (treated as `["Due Date"]`). Bot looks for `[Field] Update Count` columns (e.g. `Due Date Update Count`, `Status Update Count`) and increments on each detected change. Moves from a per-database checkbox in Hub Section 1 to a text-list field ("Update Count Fields").
 - **Breaking change:** `due_date_tracking = true` is replaced. Existing users must update `config.toml`. Add to deploy prerequisites when this ships.
 - **Type support:**
 
@@ -315,14 +336,14 @@ The user maintains high-level mission/workbench areas in Notion. Each mission ha
 
 ### Open questions
 - **Attribution method:** explicit relation field on the task (precise but requires user to fill it in), tag/keyword match (automatic but fuzzy), or mission page rollup?
-- **Data model:** does the bot write anything back to the mission page, or is this pure reporting via Notion_PowerBI?
+- **Data model:** does the bot write anything back to the mission page, or is this pure reporting via Notion_Analytics?
 - **"Timer" definition:** duration field, task count, or something else? No logged time exists — effort is inferred.
-- **Scope:** is this Notion_Automator (bot writes to tasks/missions) or Notion_PowerBI (read-only reporting from existing data)?
+- **Scope:** is this Notion_Automator (bot writes to tasks/missions) or Notion_Analytics (read-only reporting from existing data)?
 
 ### Dependencies
 - Needs attribution method decision before any design can happen.
 - If bot-writes-back: depends on Project Page for configuration.
-- If reporting-only: may belong entirely in Notion_PowerBI, not here.
+- If reporting-only: may belong entirely in Notion_Analytics, not here.
 
 ---
 

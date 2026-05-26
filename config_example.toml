@@ -24,3 +24,4 @@ enabled = true
 definitions_db_id = "your-recurring-definitions-database-id-here"
 tasks_db_id = "your-main-tasks-database-id-here"
 week_start = "Monday"  # Day the week starts on — affects period boundaries for weekly tasks (Monday–Sunday)
+governance_hour = 2    # Hour (0–23, local time) when daily governance runs — default 2 (2am)
