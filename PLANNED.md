@@ -5,6 +5,23 @@ Living design document. Sections are deleted when a feature is implemented and i
 ---
 
 
+## Feature: Clear Reminders on Close
+
+**Status:** Not pursuing — no clean implementation path exists.
+
+### Findings
+- **Clearing the `reminder` field on the date property via API:** does NOT remove the Inbox entry (user-tested). Prevents future reminder fires only.
+- **Clearing the date entirely:** removes the Inbox entry, but destroys the date value. Unacceptable — breaks `auto_closed_date`, `First Due Date`, and analytics data.
+- Notion's built-in automation solution (confirmed on Reddit, r/Notion/comments/16eavlg) is also "clear the date on close" — same destructive approach.
+- No Notion API endpoint exists for dismissing Inbox entries directly. The Inbox is a UI-layer construct.
+- Cross-device behavior is broken regardless: clearing on desktop/web does not clear the iPhone app notification.
+- Workaround: "Archive All" button in the Inbox.
+
+### Why not pursuing
+The only effective mechanism is destructive. The workaround is adequate. Revisit only if Notion exposes an Inbox API.
+
+---
+
 ## Improvement: Governance Schema Validation
 
 **Status:** Pre-design
@@ -232,10 +249,10 @@ All non-formula/non-rollup fields: Type (select, pre-populated options), Cadence
 - **Notion Tips callout** — Status Icon formula is the one tip tightly coupled to bot behavior; other tips (Task Creation Hub, button fields, parent/child buttons) belong in a separate personal Notion page, not the README.
 
 ### Deliverables
-- `docs/recurring-task-usage-guide.md` — Notion-importable markdown guide for recurring task configuration. Self-contained; no links to code or version-specific internals. Avoid heavy table use (Notion markdown import renders tables inconsistently). Scope: how to configure your first RTD, common patterns, non-obvious behaviors. Distinct from the README Usage Guide (which is for technical readers of the tool docs).
+- `docs/recurring-task-usage-guide.md` — Notion-importable markdown guide for recurring task configuration. Self-contained; no links to code or version-specific internals. Avoid heavy table use (Notion markdown import renders tables inconsistently). Scope: how to configure your first RTD, common patterns, non-obvious behaviors. Distinct from the README Usage Guide (which is for technical readers of the tool docs). Include a section on `day_start_hour` — explain that tasks closed before `day_start_hour` count toward the previous day's period, and give guidance for extreme circadian rhythms.
 
 ### Open questions
-- Status dashboard write frequency: governance runs only (startup + 2am cron) to avoid excessive API writes.
+- Status dashboard write frequency: governance runs only (startup + daily governance cron) to avoid excessive API writes.
 
 ### Dependencies
 - Automation Hub must exist before Notifications can store webhook URLs there.

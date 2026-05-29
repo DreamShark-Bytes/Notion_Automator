@@ -7,6 +7,17 @@ token = "ntn_your_token_here"
 # Seconds between polls (applies to all databases)
 poll_interval = 60
 
+# Hour (0–23, local time) when your logical day begins. Times between midnight and this hour
+# are attributed to the previous calendar day for period key, occurrence #, and quota counting.
+# Also controls when the daily governance cron fires.
+# Default: 3 (3am — the statistical nadir of human activity; minimizes accidental day crossovers).
+day_start_hour = 3
+
+# First day of the week. Affects period boundaries for weekly recurring tasks.
+# Matches Notion's default (Sunday). Set to "Monday" for ISO/work-week convention.
+# Accepts any full day name: "Sunday", "Monday", … "Saturday".
+week_start = "Sunday"
+
 # Task databases to watch. Each [[databases]] block is one database.
 # Flags control which automations are active for that database (absent = disabled).
 [[databases]]
@@ -23,5 +34,3 @@ due_date_tracking = true   # track Due Date Update Count and First Due Date
 enabled = true
 definitions_db_id = "your-recurring-definitions-database-id-here"
 tasks_db_id = "your-main-tasks-database-id-here"
-week_start = "Monday"  # Day the week starts on — affects period boundaries for weekly tasks (Monday–Sunday)
-governance_hour = 2    # Hour (0–23, local time) when daily governance runs — default 2 (2am)

@@ -68,9 +68,9 @@ run_governance(client)               ← cross-page, all GOVERNANCE
 begin poll loop
 ```
 
-**Scheduled governance (2am cron):**
+**Scheduled governance (governance cron):**
 
-The 2am cron is not a separate process — it is a time-triggered run of the full governance suite inside the poll loop. When `_is_cron_time()` returns True, the daemon runs the same two-phase sequence before resuming polling:
+The governance cron is not a separate process — it is a time-triggered run of the full governance suite inside the poll loop. When `_is_cron_time()` returns True, the daemon runs the same two-phase sequence before resuming polling:
 
 ```
 if _is_cron_time(last_cron_run, hour=2):
@@ -80,7 +80,7 @@ if _is_cron_time(last_cron_run, hour=2):
     last_cron_run = now
 ```
 
-`run_automations_init_pass` internally iterates `AUTOMATIONS`; `run_governance` internally iterates `GOVERNANCE`. The cron calls the functions — the registries are an internal detail. This means any function that needs to run at the period boundary simply needs to be in the correct registry and it is picked up by both startup and the 2am cron automatically.
+`run_automations_init_pass` internally iterates `AUTOMATIONS`; `run_governance` internally iterates `GOVERNANCE`. The cron calls the functions — the registries are an internal detail. This means any function that needs to run at the period boundary simply needs to be in the correct registry and it is picked up by both startup and the governance cron automatically.
 
 **Environment variables:**
 
@@ -344,8 +344,8 @@ The definitions database is created manually by the user (see README §6). Autom
 | Anchor Time            | Text                   | e.g. `13:00`; blank = no specific time. **Bad Habit: ignored.**                                                                                                                                                                                                                                                 |
 | Grace Period (days)    | Number                 | Responsibilities only — auto-cancelled this many days past due; blank = never. Overridden by `Do Not Autoclose`. **Bad Habit: ignored.**                                                                                                                                                                        |
 | Do Not Autoclose       | Checkbox               | Default: False. When True, suppresses grace-period auto-cancellation for this RTD regardless of Type or Grace Period value. Intended for Responsibilities the user never wants auto-cancelled.                                                                                                                  |
-| Tasks Done This Period | Number                 | **Bot-managed display field.** Incremented by the bot each time a task closes in the current period. Reset to 0 by the 2am cron at period boundary. User should not edit. **Bad Habit and Unlimited: not tracked.**                                                                                             |
-| Current Period         | Date (start + end)     | **Bot-managed display field.** Updated by the 2am cron to show the current period's date range (e.g. Apr 1 → Apr 30). **Bad Habit and Unlimited: not tracked.**                                                                                                                                                 |
+| Tasks Done This Period | Number                 | **Bot-managed display field.** Incremented by the bot each time a task closes in the current period. Reset to 0 by the governance cron at period boundary. User should not edit. **Bad Habit and Unlimited: not tracked.**                                                                                             |
+| Current Period         | Date (start + end)     | **Bot-managed display field.** Updated by the governance cron to show the current period's date range (e.g. Apr 1 → Apr 30). **Bad Habit and Unlimited: not tracked.**                                                                                                                                                 |
 | Notes                  | Rich Text              |                                                                                                                                                                                                                                                                                                                 |
 | Last Completed         | Rollup                 | Max of `Closed Date` from related tasks (Notion-computed)                                                                                                                                                                                                                                                       |
 | Number of Open Tasks   | Rollup                 | Count of related tasks where `Is Open` = true (Notion-computed via checkbox formula workaround — see §7.1 Is Open field)                                                                                                                                                                                        |
@@ -402,7 +402,7 @@ Instance # is assigned at task creation by counting existing tasks, not by readi
 
 `query_database` is used, so archived and permanently deleted tasks are excluded from the count — if tasks were deleted, the sequence restarts from the remaining count (acceptable; deleted tasks remove their slot).
 
-**At the 2am cron (period boundary carry-over):** Instance # on the carried-over open task is updated to: count of all tasks for this RTD in the new period + 1 (which will be 1 if no tasks exist yet for the new period).
+**At the governance cron (period boundary carry-over):** Instance # on the carried-over open task is updated to: count of all tasks for this RTD in the new period + 1 (which will be 1 if no tasks exist yet for the new period).
 
 **At most N per period alert**: when the count for the current period reaches N, the bot creates the next task normally but flags the RTD (mechanism TBD — depends on Status Page / notification design).
 
@@ -426,13 +426,13 @@ Governance automations initialize the excluded fields correctly on the new task.
 
 **Responsibilities** — commitments that should be called out when missed. If `Do Not Autoclose` is False and `Grace Period (days)` is set, the bot cancels the task when `now() > due date end (or start) + Grace Period (days)` and `Ignore Grace Period (Recurring Task)` on the task is False. Cancellation triggers normal next-task creation. If `Do Not Autoclose` is True, the task stays open indefinitely like a Habit — the user handles closure manually.
 
-Grace period evaluation is **cron-only** — it runs in a GOVERNANCE function at startup and 2am, never during the regular poll loop. This gives the user the full day to adjust details (including Due Date) before the bot intervenes. A Due Date change naturally shifts the window: `now() > new_due_date + grace_period` is re-evaluated at the next cron run. No special event handling for Due Date changes.
+Grace period evaluation is **cron-only** — it runs in a GOVERNANCE function at startup and the daily governance cron, never during the regular poll loop. This gives the user the full day to adjust details (including Due Date) before the bot intervenes. A Due Date change naturally shifts the window: `now() > new_due_date + grace_period` is re-evaluated at the next cron run. No special event handling for Due Date changes.
 
 **Grace period cap when grace period exceeds the period length:**
 
 If a task's Due Date falls in a past period and the stated Grace Period would keep it open indefinitely, a hard cap applies: cancel the task if `now >= current_period_start + 1 day`. This means:
-- At the first 2am cron of a new period: new task is created; old carry-over task is not yet cancelled (given 1 day of grace)
-- At the second 2am cron (Day 2 of new period): cap fires; old task cancelled regardless of stated Grace Period value
+- At the first governance cron of a new period: new task is created; old carry-over task is not yet cancelled (given 1 day of grace)
+- At the second governance cron (Day 2 of new period): cap fires; old task cancelled regardless of stated Grace Period value
 
 Result: at most 2 open tasks simultaneously for at most 1 day. `Period=Day, Grace=9999` cleans up in 1 day. Normal grace period still fires first — if grace expires within the same period, the cap never activates.
 
@@ -499,11 +499,11 @@ When governance determines a task was deleted or archived, the bot creates a rep
 
 To stop a series: set `Active = False` on the RTD. Governance will no longer create tasks for inactive definitions.
 
-#### Scheduled governance (2am cron)
+#### Scheduled governance (governance cron)
 
 Runs daily at 2:00 AM server timezone. Low traffic, day is clearly over, users have had the evening to notice and react. Server timezone used because the program is self-hosted.
 
-The 2am cron is **not a separate process** — it is a time-triggered run of the full governance suite (both `AUTOMATIONS` per-page pass and `GOVERNANCE` cross-page pass) within the daemon's poll loop. See §3.1 for the implementation pattern.
+The governance cron is **not a separate process** — it is a time-triggered run of the full governance suite (both `AUTOMATIONS` per-page pass and `GOVERNANCE` cross-page pass) within the daemon's poll loop. See §3.1 for the implementation pattern.
 
 Functions that need to run at the period boundary belong in the existing registries — no new infrastructure is needed:
 
@@ -516,7 +516,7 @@ Functions that need to run at the period boundary belong in the existing registr
 
 #### Period boundary behavior
 
-The 2am cron runs the full governance suite. At period boundary it performs two distinct checks:
+The governance cron runs the full governance suite. At period boundary it performs two distinct checks:
 
 **1. Carry-over: open task from the previous period**
 
@@ -610,7 +610,7 @@ Resolved design decisions. Each entry states the rule and the reason so future c
 **[Q1-C] A manually-created task linked to an RTD is initialized by the bot on the next poll.**
 - No grace window is given before initialization — the bot sets Instance #, Period Key, Period Target on first poll.
 - If Due Date is empty or within the current period → becomes `Current Open Task` immediately.
-- If Due Date is in a future period → initialized but not set as `Current Open Task`; the 2am cron promotes it when the period arrives.
+- If Due Date is in a future period → initialized but not set as `Current Open Task`; the governance cron promotes it when the period arrives.
 - If the cadence limit is already met when the period arrives → archive the bot-created task, set `Current Open Task` to the user-created task.
 
 **[Q1] Archiving uses `archive_page()` (Notion trash), not Cancellation.**
@@ -634,7 +634,7 @@ Resolved design decisions. Each entry states the rule and the reason so future c
 ### Governance Behavior
 
 **[Q2a] Cadence type formerly called "N per period" is renamed "At most N per period".**
-- Reason: "N per period" implied exactly N. "At most N" correctly frames it as a soft cap — the bot continues creating tasks past N but alerts the user. Instance # increments within the period and resets at period boundary via the 2am cron.
+- Reason: "N per period" implied exactly N. "At most N" correctly frames it as a soft cap — the bot continues creating tasks past N but alerts the user. Instance # increments within the period and resets at period boundary via the governance cron.
 - No due dates for this cadence type — occurrence tracking only. Enforced in `_calc_due_date`: `At most N per period` returns `None` alongside `Unlimited`.
 - Alert mechanism when N is reached: `RTD_AT_MOST_N_REACHED` Bot Note on the RTD (see [Q12]).
 
@@ -698,7 +698,15 @@ Resolved design decisions. Each entry states the rule and the reason so future c
 - Enforced at runtime by the cron, not at task creation time. The stated Grace Period value is not modified.
 - Implementation: if task's `Due Date` falls in a past period (derived via `_period_key`) AND `now >= current_period_start + 1 day` → cancel, regardless of grace period value. `Due Date` is used as ground truth; the stored `Period Key (Recurring Task)` field is never read for this comparison.
 
-**[Q6] Grace period auto-close is evaluated by the 2am cron only — not during the regular poll loop.**
+**[day_start_hour] Configurable logical day boundary — times before this hour count as "yesterday."**
+- `day_start_hour` (global config, default 3) sets the hour when the logical day begins. Any datetime between midnight and `day_start_hour` is attributed to the previous calendar day for all period calculations: period key, occurrence #, quota counting, and governance cron trigger.
+- Replaces `governance_hour`. Both purposes (when governance runs, when the day turns over) are intentionally unified under one variable — users who ask "when does my day reset?" have a single answer.
+- Default 3am: statistical nadir of human activity; minimizes accidental day crossovers for night-owl users without affecting early risers.
+- Implementation: `_period_dt(dt)` in `recurring_tasks.py` returns `dt - timedelta(hours=_day_start_hour)`. `_period_key` applies `_period_dt` before any strftime call. No callers of `_period_key` change — the offset is invisible to them.
+- Period label convention: the period key uses the calendar date of the logical day start. A period key of "2026-05-29" covers midnight May 29 + day_start_hour through midnight May 30 + day_start_hour (exclusive). For default day_start_hour=3: "2026-05-29" covers 3am May 29 – 2:59am May 30.
+- Extreme circadian case (e.g. active 6pm–11am): set `day_start_hour` to shortly after waking (e.g. 14 for 2pm). The period label will be the calendar date of waking, not sleeping. Users should reframe tasks as belonging to the day they woke up in.
+
+**[Q6] Grace period auto-close is evaluated by the governance cron only — not during the regular poll loop.**
 - Reason: the user may be mid-edit when the condition becomes true. Firing within 60 seconds would cancel a task the user is actively working on. The cron gives the full day to react.
 - Implementation: moves from `auto_recurring_tasks` (AUTOMATIONS) to a dedicated GOVERNANCE function.
 - Due Date changes require no special handling — the cron re-evaluates `now() > due_date + grace_period` at the next run. Moving the due date forward extends the window naturally; moving it to the past brings the condition forward. Same logic either way.
@@ -709,7 +717,7 @@ Resolved design decisions. Each entry states the rule and the reason so future c
 - **Limitation:** the RTD database is not in the `database_ids` poll list — the daemon does not watch RTD pages for changes. Period Target sync fires the next time the *task itself* is edited, or at daemon restart (init pass). If the RTD changes but no task edits occur, the sync is delayed until one of those triggers. This is an acceptable trade-off — RTD config changes are infrequent and the drift is cosmetic only.
 
 **[Period field change] Changing `Period`, `Cadence Type`, or `N Cadence` on an RTD mid-series takes effect on the next governance run.**
-- Governance drift-corrects Period Key, Occurrence #, and Period Target on all tasks in the current and future periods on every pass. An RTD config change is fully reflected after the next startup, 2am cron, or RTD activation trigger — no `--reconcile` needed for current/future tasks.
+- Governance drift-corrects Period Key, Occurrence #, and Period Target on all tasks in the current and future periods on every pass. An RTD config change is fully reflected after the next startup, governance cron, or RTD activation trigger — no `--reconcile` needed for current/future tasks.
 - Historical closed tasks (periods before the current period) are not corrected by normal governance. Use `--reconcile` if historical records also need correction.
 - Due Dates on existing open tasks are not rewritten — only newly created tasks get Due Dates computed from the new settings. An open task may retain a Due Date from the old period granularity; it will close normally and the replacement task will have the correct Due Date.
 
@@ -720,10 +728,10 @@ Resolved design decisions. Each entry states the rule and the reason so future c
 - Re-opened tasks keep their original Instance # — a re-open is not a new instance.
 
 **[Q5] `Tasks Done This Period` is recomputed from scratch at each governance pass — not maintained in memory.**
-- Reason: real-time increments would go stale during any daemon downtime. Computing from `Closed Date` dates in Notion at startup and 2am cron guarantees accuracy regardless of restarts or missed events.
+- Reason: real-time increments would go stale during any daemon downtime. Computing from `Closed Date` dates in Notion at startup and governance cron guarantees accuracy regardless of restarts or missed events.
 - Count: related MT tasks where `Closed Date` falls within the current period's date range. `Closed Date` is used as ground truth — not `Period Key` field matching.
 - No extra queries needed: task data is already fetched inside `run_recurring_governance`.
-- The 2am cron also updates `Period Key (Recurring Task)` and `Occurrence # this Period (Recurring Task)` on any open task that carried over from a previous period (see §7.1 Period boundary behavior).
+- The governance cron also updates `Period Key (Recurring Task)` and `Occurrence # this Period (Recurring Task)` on any open task that carried over from a previous period (see §7.1 Period boundary behavior).
 
 **[Q4] `Previous Task (Recurring Task)` field and `Link Previous Tasks` RTD checkbox removed — no bot logic needed.**
 - Reason: the original intent (easy reference to the prior instance, e.g. to copy a car mileage reading) is fully achievable via a Notion sorted view of the Recurring Series relation: sort by Closed Date (primary, descending) → Due Date (secondary) → Created Date (tertiary). The most recently closed task surfaces at the top. No bot work required; no schema overhead.
@@ -733,7 +741,7 @@ Resolved design decisions. Each entry states the rule and the reason so future c
 
 ### Architecture
 
-**[Architecture] The 2am cron is a time-triggered run of the full governance suite — not a separate process or registry.**
+**[Architecture] The governance cron is a time-triggered run of the full governance suite — not a separate process or registry.**
 - Reason: the governance suite (per-page AUTOMATIONS pass + cross-page GOVERNANCE pass) already does exactly what the cron needs. Adding a separate cron system would duplicate infrastructure for no benefit.
 
 **[Architecture] Webhook-based event delivery is not used — polling is the delivery mechanism.**
@@ -794,10 +802,10 @@ Resolved design decisions. Each entry states the rule and the reason so future c
 - No destructive action on open tasks when an RTD goes inactive — least-destructive-intervention principle. Open tasks remain; user closes them when ready.
 
 **[RTD Monitoring / Z1] The RTD database is polled in the main loop; governance triggers only when an RTD is activated.**
-- Problem: governance only ran at startup and 2am. A new RTD or an RTD toggled to Active mid-session got no task until the next governance pass.
+- Problem: governance only ran at startup and the daily cron. A new RTD or an RTD toggled to Active mid-session got no task until the next governance pass.
 - Fix: `_poll_rtd_for_changes()` runs each loop iteration (same interval as task DB polls). It triggers `run_governance()` only when an RTD's Status transitions to Active (including newly created RTDs already set to Active). Other field changes (Grace Period, N Cadence, Anchor Time, etc.) update the snapshot but do not trigger governance — they take effect at the next scheduled governance run.
 - Rationale for trigger scope: field changes like Grace Period do not require an immediate governance run; triggering on every RTD edit caused spurious governance runs and race conditions where governance fired before Notion propagated the edit.
-- After governance fires (whether from RTD activation or 2am cron), the RTD snapshot is fully refreshed from the API. This ensures bot-written Bot Notes become the new baseline and do not re-trigger governance on the next poll.
+- After governance fires (whether from RTD activation or governance cron), the RTD snapshot is fully refreshed from the API. This ensures bot-written Bot Notes become the new baseline and do not re-trigger governance on the next poll.
 - `rt_defs_id` is hoisted to function scope so the poll loop can access it regardless of whether recurring tasks were fully initialized.
 
 **[Governance drift correction scope] Normal governance corrects Period Key, Occurrence #, and Period Target on all tasks in the current and future periods — not open tasks only.**
@@ -807,8 +815,9 @@ Resolved design decisions. Each entry states the rule and the reason so future c
 - Tasks cancelled in the current governance pass are treated as cancelled for Occurrence # purposes (via the `cancelled_ids` set) even though `all_tasks` still shows them as open.
 - `--reconcile` remains for force-writing all periods including history; normal governance is drift-only (writes only when value has changed).
 
-**[week_start] The first day of the week is configurable via `week_start` in `config.toml`.**
-- Default: `"Monday"` (ISO week, unchanged behavior). Accepts any full day name ("Monday"–"Sunday").
+**[week_start] The first day of the week is configurable via `week_start` in `config.toml` (global key).**
+- Default: `"Sunday"` — matches Notion's default week view. Set to `"Monday"` for ISO/work-week convention. Accepts any full day name ("Sunday"–"Saturday").
+- Global config key (not under `[recurring_tasks]`) — treated as a workspace-wide calendar preference, consistent with `day_start_hour`.
 - Parsed in `daemon.py`, passed to `recurring_tasks.init(week_start_day)` as a 0–6 integer (0 = Monday, 6 = Sunday).
 - `_week_start_day` module variable in `recurring_tasks.py`; affects `_week_start_date()` helper, `_period_key()`, `_period_dates()` (no-anchor span), `_period_start()`, and `_period_end()`.
 - Period key format change: weekly period keys changed from ISO `"YYYY-Www"` to date-based `"W-YYYY-MM-DD"` (date of week-start day). Existing open recurring tasks with old-format period keys should have their `Period Key (Recurring Task)` field cleared before deploying, or the display value will show the old format until the next bot write.

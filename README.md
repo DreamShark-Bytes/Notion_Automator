@@ -289,6 +289,15 @@ Connect your integration to both databases (`...` menu → **Add connections**).
 ### Config
 
 ```toml
+# Global — controls when the logical day begins (affects all period calculations).
+# Times between midnight and this hour are attributed to the previous calendar day.
+# Also sets when the daily governance cron fires. Default: 3 (3am).
+day_start_hour = 3
+
+# Global — first day of the week. Affects weekly recurring task period boundaries.
+# Default: "Sunday" (matches Notion). Use "Monday" for ISO/work-week convention.
+week_start = "Sunday"
+
 [[databases]]
 id          = "your-tasks-database-id"
 closed_date = true   # required for recurring task period logic
@@ -358,6 +367,9 @@ Set `poll_interval` in `config.toml` (applies to all databases).
 
 Tips for configurations that are valid but non-obvious. Useful once you're familiar with the features.
 
+**`day_start_hour` — setting your logical day boundary:**
+By default, the daemon treats 3am as the start of a new day. Any task completed between midnight and 3am is attributed to the *previous* calendar day's period. This prevents an accidental late-night close from counting toward the next day's quota. If you regularly work past 3am, increase this value (e.g. `day_start_hour = 4`). If you have an extreme schedule (e.g. sleep at 11am, wake at 6pm), set it to shortly after you wake up — periods will be labeled with the calendar date of your waking day. The same setting controls when the daily governance cron fires.
+
 **`Minimum N per period` with Anchor Day:**
 If all N repetitions of an activity happen at the same scheduled event (e.g. a weekly meeting, a class, a practice), `Minimum N per period` is probably not the right cadence. Use `Once per period` with Anchor Day set to that event's day instead. Completing the task means you showed up; how many times you did something *during* the event is detail that belongs in the task name or notes, not in N. `Minimum N per period` is better suited to activities spread across the period with no fixed day.
 
@@ -416,11 +428,17 @@ To diff your local `automations.py` against the new version before overwriting: 
 
 ---
 
+## Credits
+
+Developed in collaboration with [Claude Code](https://claude.ai/code) by Anthropic. All architectural decisions, requirements definition, design reviews, testing, and production deployment are owned by the human author. Claude assisted with implementation, debugging, and documentation under directed oversight — not vibe-coding, but a design-led workflow where nothing ships without human review and approval.
+
+---
+
 ## Future Plans
 
 See `PLANNED.md` for full details.
 
-- **Project Page** — A single Notion page per project as the daemon's home base. Auto-creates required databases on first run, surfaces health and status information, and eventually replaces `config.toml` for settings that change frequently.
+- **Automation Hub** — A single Notion page as the daemon's home base. Auto-creates required databases on first run, surfaces health and status information, and eventually replaces `config.toml` for behavioral settings that change frequently.
 - **Notifications** — Outbound webhook support (Discord, Telegram) for alerts on governance events.
 - **Change Tracking** — Opt-in field change log with old/new values and timestamps, feeding into reporting tools.
 - **First Value Field Tracking** — Automatically stamp a `First [Field Name]` column with the first observed value of any configured field.

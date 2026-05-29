@@ -35,6 +35,7 @@ _definitions_db_id: str | None = None
 _tasks_db_id: str | None = None
 _task_db_properties: set[str] = set()  # populated lazily on first governance/automation run
 _week_start_day: int = 0  # 0 = Monday … 6 = Sunday; configurable via week_start in config.toml
+_day_start_hour: int = 0  # Hour (0–23) when the logical day begins; midnight to this hour is "yesterday"
 
 # Retroactive reconcile flags — set via set_reconcile_flags() before calling run_recurring_governance().
 # When True, governance writes the field to ALL tasks (open, closed, cancelled) not just open ones.
@@ -72,15 +73,19 @@ def set_reconcile_flags(
     _reconcile_occurrence_number = occurrence_number
 
 
-def init(definitions_db_id: str, tasks_db_id: str, week_start_day: int = 0) -> None:
+def init(definitions_db_id: str, tasks_db_id: str, week_start_day: int = 0, day_start_hour: int = 3) -> None:
     """Call once at daemon startup to enable recurring task automation.
 
     week_start_day: 0 = Monday (default/ISO), 6 = Sunday, etc.
+    day_start_hour: whole hour (0–23) when the logical day begins. Times from midnight to
+        day_start_hour are attributed to the previous calendar day for all period
+        calculations. Default 3 (3am).
     """
-    global _definitions_db_id, _tasks_db_id, _week_start_day
+    global _definitions_db_id, _tasks_db_id, _week_start_day, _day_start_hour
     _definitions_db_id = definitions_db_id
     _tasks_db_id = tasks_db_id
     _week_start_day = week_start_day
+    _day_start_hour = day_start_hour
 
 
 def _load_task_db_schema(client: "NotionClient") -> None:
@@ -265,6 +270,16 @@ def _get_status_group(client: "NotionClient", page: dict | None, status_field: s
 #  Period key
 # ------------------------------------------------------------------ #
 
+def _period_dt(dt: datetime) -> datetime:
+    """Shift dt back by day_start_hour so times before the logical day boundary
+    are attributed to the previous calendar day.
+
+    Example: day_start_hour=3, dt=01:30am → returns 10:30pm the previous night.
+    Callers pass the result to _period_key; they do not call _period_dt themselves.
+    """
+    return dt - timedelta(hours=_day_start_hour)
+
+
 def _week_start_date(dt: datetime) -> datetime:
     """Return midnight on the week-start day (per _week_start_day) that contains dt."""
     days_since_start = (dt.weekday() - _week_start_day) % 7
@@ -272,7 +287,12 @@ def _week_start_date(dt: datetime) -> datetime:
 
 
 def _period_key(period: str, dt: datetime) -> str:
-    """Canonical string identifying the period a datetime falls in."""
+    """Canonical string identifying the period a datetime falls in.
+
+    Applies the day_start_hour offset before any date math so times between
+    midnight and day_start_hour are treated as belonging to the previous period.
+    """
+    dt = _period_dt(dt)
     if period == "Day":
         return dt.strftime("%Y-%m-%d")
     if period == "Week":

@@ -56,18 +56,32 @@ args = parser.parse_args()
 
 from logging.handlers import RotatingFileHandler
 
-logging.basicConfig(
-    level=logging.DEBUG if args.debug else logging.INFO,
-    format="%(asctime)s - %(levelname)s - [%(funcName)s] - %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        RotatingFileHandler(
-            "notion_daemon.log",
-            maxBytes=5 * 1024 * 1024,  # 5 MB per file
-            backupCount=3,             # keep notion_daemon.log + .1 .2 .3
-        ),
-    ],
+_log_level = logging.DEBUG if args.debug else logging.INFO
+_log_fmt = logging.Formatter("%(asctime)s - %(levelname)s - [%(funcName)s] - %(message)s")
+
+_stream_handler = logging.StreamHandler()
+_stream_handler.setLevel(_log_level)
+_stream_handler.setFormatter(_log_fmt)
+
+_rotating_handler = RotatingFileHandler(
+    "notion_daemon.log",
+    maxBytes=5 * 1024 * 1024,  # 5 MB per file
+    backupCount=3,             # keep notion_daemon.log + .1 .2 .3
 )
+_rotating_handler.setLevel(_log_level)
+_rotating_handler.setFormatter(_log_fmt)
+
+# 48-hour debug window — separate file, not rotating.
+# notion_api logger stays at INFO (its DEBUG output is massive JSON response bodies).
+_debug_handler = logging.FileHandler("notion_daemon_debug.log", mode="a")
+_debug_handler.setLevel(logging.DEBUG)
+_debug_handler.setFormatter(_log_fmt)
+
+logging.basicConfig(
+    level=logging.DEBUG,  # Root at DEBUG so _debug_handler receives all records.
+    handlers=[_stream_handler, _rotating_handler, _debug_handler],
+)
+logging.getLogger("notion_api").setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -96,7 +110,7 @@ def _strip_files(page: dict) -> dict:
 def run_governance(client: NotionClient) -> list[dict]:
     """
     Run all registered GOVERNANCE functions, then flush and reset Bot Notes.
-    Called at daemon startup and on the 2am daily cron.
+    Called at daemon startup and on the daily governance cron (fires at day_start_hour).
 
     Returns a list of pages created during governance so the caller can run
     an automations init pass on them (to populate fields like Reopen Count
@@ -343,26 +357,48 @@ def main():
 
     poll_interval = cfg.get("poll_interval", 60)
 
+    _dsh_aliases = {"governance_hour", "day_start", "daystart_hour", "start_hour"}
+    for _alias in _dsh_aliases:
+        if _alias in cfg:
+            logger.warning(
+                f"Config key '{_alias}' is not recognized — did you mean 'day_start_hour'? Value ignored."
+            )
+    _raw_dsh = cfg.get("day_start_hour")
+    if _raw_dsh is None:
+        logger.info("day_start_hour not set in config.toml — using default 3 (3am).")
+        day_start_hour = 3
+    else:
+        try:
+            _dsh_float = float(_raw_dsh)
+        except (TypeError, ValueError):
+            logger.warning(f"day_start_hour value '{_raw_dsh}' is not a valid number — defaulting to 3.")
+            day_start_hour = 3
+        else:
+            day_start_hour = int(_dsh_float)
+            if day_start_hour != _dsh_float:
+                logger.warning(
+                    f"day_start_hour {_raw_dsh} is not a whole number — truncated to {day_start_hour}."
+                )
+            if not 0 <= day_start_hour <= 23:
+                logger.warning(f"day_start_hour {day_start_hour} is out of range (0–23) — defaulting to 3.")
+                day_start_hour = 3
+
     _WEEK_DAY_MAP = {
         "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
         "friday": 4, "saturday": 5, "sunday": 6,
     }
+    week_start_str = str(cfg.get("week_start", "Sunday")).lower()
+    week_start_day = _WEEK_DAY_MAP.get(week_start_str, 6)
+    if week_start_str not in _WEEK_DAY_MAP:
+        logger.warning(f"Unknown week_start '{cfg.get('week_start')}' — defaulting to Sunday.")
 
     rt_defs_id: str | None = None
     rt_cfg = cfg.get("recurring_tasks", {})
     if rt_cfg.get("enabled"):
         rt_defs_id = rt_cfg.get("definitions_db_id")
         rt_tasks_id = rt_cfg.get("tasks_db_id")
-        week_start_str = str(rt_cfg.get("week_start", "Monday")).lower()
-        week_start_day = _WEEK_DAY_MAP.get(week_start_str, 0)
-        if week_start_str not in _WEEK_DAY_MAP:
-            logger.warning(f"Unknown week_start '{rt_cfg.get('week_start')}' — defaulting to Monday.")
-        governance_hour = int(rt_cfg.get("governance_hour", 2))
-        if not 0 <= governance_hour <= 23:
-            logger.warning(f"governance_hour {governance_hour} is out of range (0–23) — defaulting to 2.")
-            governance_hour = 2
         if rt_defs_id and rt_tasks_id:
-            recurring_tasks.init(rt_defs_id, rt_tasks_id, week_start_day)
+            recurring_tasks.init(rt_defs_id, rt_tasks_id, week_start_day, day_start_hour)
         else:
             logger.warning("recurring_tasks enabled but definitions_db_id or tasks_db_id is missing — skipping.")
             rt_defs_id = None
@@ -396,7 +432,7 @@ def main():
         for db_id in database_ids
     }
 
-    # GOVERNANCE functions (startup pass — also runs daily at 2am via cron below).
+    # GOVERNANCE functions (startup pass — also runs daily at day_start_hour via cron below).
     # --reconcile sets flags before this single governance run so no second pass is needed.
     if args.reconcile:
         logger.info("--reconcile flag set: retroactively writing Period Key, Occurrence #, and Period Target on all recurring tasks (task creation skipped).")
@@ -433,10 +469,10 @@ def main():
     # Subsequent polls only fetch pages edited after startup.
     last_polled: dict[str, str] = {db_id: startup_time for db_id in database_ids}
 
-    # Track date of last GOVERNANCE run so the 2am cron fires at most once per day.
+    # Track date of last GOVERNANCE run so the daily cron fires at most once per day.
     # Initialized to yesterday so the startup governance run does not suppress
-    # tonight's 2am cron. The startup run has already executed above; the cron
-    # will fire the next time the clock reaches 2am.
+    # the next cron. The startup run has already executed above; the cron
+    # will fire the next time the clock reaches day_start_hour.
     from datetime import timedelta
     last_governance_date = datetime.now().date() - timedelta(days=1)
 
@@ -447,12 +483,12 @@ def main():
     logger.info(f"  Governance : {[fn.__name__ for fn in GOVERNANCE]}")
 
     while True:
-        # 2am daily GOVERNANCE cron
+        # Daily GOVERNANCE cron — fires once per calendar day at day_start_hour.
         now_local = datetime.now()
-        governance_time_today = datetime.combine(now_local.date(), dtime(governance_hour, 0))
+        governance_time_today = datetime.combine(now_local.date(), dtime(day_start_hour, 0))
         if now_local >= governance_time_today and last_governance_date != now_local.date():
             last_governance_date = now_local.date()
-            logger.info(f"{governance_hour:02d}:00 cron: running GOVERNANCE functions.")
+            logger.info(f"{day_start_hour:02d}:00 cron: running GOVERNANCE functions.")
             gov_created = run_governance(client)
             if gov_created:
                 _init_pass_on_pages(client, gov_created, snapshots)
@@ -464,7 +500,7 @@ def main():
                     rtd_snapshot = {p["id"]: _strip_files(p) for p in rtd_pages}
                     last_polled_rtd = _utcnow_iso()
                 except Exception as e:
-                    logger.error(f"Failed to refresh RTD snapshot after 2am governance: {e}")
+                    logger.error(f"Failed to refresh RTD snapshot after governance cron: {e}")
 
         # RTD change detection — triggers governance only when an RTD is activated.
         if rt_defs_id and last_polled_rtd is not None:
