@@ -134,12 +134,6 @@ FIELDS_NOT_INHERITED = {
     "Recurring Series",
 }
 
-# How many days into a new period before stale Responsibility tasks are auto-cancelled.
-# 1 means: cancel on the first governance run that occurs at least 1 day past the period
-# boundary (e.g. ≥ Tuesday for a weekly task, ≥ the 2nd for a monthly task).
-# Increase to give more buffer before cancellation fires.
-PERIOD_CAP_DAYS = 1
-
 # RTD Status field — replaces the Active checkbox. Only RTDs with this status create tasks.
 RTD_STATUS_FIELD  = "Status"
 RTD_ACTIVE_STATUS = "Active"
@@ -955,8 +949,9 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
                 grace = _get_number(definition, "Grace Period (days)")
                 if grace is None:
                     grace = 0  # No grace period set → cancel on due date
-                cur_period_start = _period_start(period, now)
-                past_cap = now >= cur_period_start + timedelta(days=PERIOD_CAP_DAYS)
+                elif grace < 0:
+                    logger.warning(f"RTD '{def_name}': Grace Period is negative ({grace}) — defaulting to 0.")
+                    grace = 0
                 for task in open_tasks:
                     ignore_prop = _get_prop(task, "Ignore Grace Period (Recurring Task)")
                     if ignore_prop and ignore_prop.get("checkbox"):
@@ -964,23 +959,20 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
                     due = _get_due_end_or_start(task)
                     if not due:
                         continue
-                    # Derive expected period from Due Date (ground truth).
-                    # Open tasks with no Due Date fall back to now → current period → never stale.
-                    # Tasks with no period definition cannot have staleness determined.
+                    # Derive task's period from Due Date start — used by "Minimum N" archive logic
+                    # to count completions in the task's period. Overdue check uses end date
+                    # (via _get_due_end_or_start) so user-set date ranges are respected.
                     # The stored Period Key field is never read here — it may be corrupted.
                     if period:
                         due_str = _get_date(task, "Due Date")
                         pk_dt = (_parse_closed_dt(due_str) if due_str else None) or now
                         task_pk = _period_key(period, pk_dt)
                     else:
-                        task_pk = None  # no period defined — cannot determine staleness
-                    # A task is stale only if its period is BEFORE the current period.
-                    # Tasks in a FUTURE period are pre-created and must not be cancelled.
-                    stale = task_pk is not None and current_period_key is not None and task_pk < current_period_key
-                    if _is_overdue_by(due, grace) or (stale and past_cap):
-                        reason = "grace period expired" if _is_overdue_by(due, grace) else "period cap (stale task in new period)"
+                        task_pk = None
+                    if _is_overdue_by(due, grace):
+                        reason = "grace period expired"
                         task_name = _get_title(task)
-                        # For "Minimum N per period": if the minimum was met in the stale
+                        # For "Minimum N per period": if the minimum was met in the task's
                         # period, archive instead of cancel — cancellation implies failure,
                         # but the user succeeded. The archived task disappears from queries;
                         # the existing create-task logic then creates a fresh task for the
@@ -996,14 +988,14 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
                             if completions_in_stale >= n_min:
                                 logger.info(
                                     f"Auto-archiving task '{task_name}' ({task['id']}) for '{def_name}': "
-                                    f"minimum met ({completions_in_stale}/{n_min}) — archiving stale task, not cancelling."
+                                    f"minimum met ({completions_in_stale}/{n_min}) — archiving task instead of cancelling."
                                 )
                                 try:
                                     client.archive_page(task["id"])
                                     cancelled_ids.add(task["id"])
                                     cancelled_tasks.append(task)  # inherit fields for the replacement task
                                 except Exception as e:
-                                    logger.error(f"Failed to archive stale task {task['id']}: {e}")
+                                    logger.error(f"Failed to archive task {task['id']}: {e}")
                                 continue
                         logger.info(f"Auto-cancelling task '{task_name}' ({task['id']}) for '{def_name}': {reason}.")
                         # Set Closed Date to the last moment of the period the Due Date

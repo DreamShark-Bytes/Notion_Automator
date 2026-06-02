@@ -209,6 +209,8 @@ Increments a **Reopen Count** field each time a task moves out of the Done statu
 
 Requires Closed Date Stamping to be enabled, since reopen detection relies on the same status transition logic.
 
+**Daemon-downtime recovery:** if a task was closed while the daemon was running (Closed Date stamped), then the user reopened it while the daemon was offline, the daemon will see a non-Complete task that still has a Closed Date set when it restarts. It treats this as a missed reopen: Reopen Count is incremented and Closed Date is cleared. This is self-healing — no manual correction needed.
+
 ### Notion setup
 
 Add a **Number** field named `Reopen Count` to your task database.
@@ -376,37 +378,73 @@ If all N repetitions of an activity happen at the same scheduled event (e.g. a w
 **Two recurring event days per period (e.g. Tuesday and Thursday):**
 The system supports one Anchor Day per series definition. To track a recurring activity that happens on two specific days per week, create two separate definitions — one anchored to Tuesday, one to Thursday — each with `Once per period`. Using `Minimum 2 per period` with no anchor would give you a due date at end of period but would not enforce the specific days.
 
+**Applying RTD config changes immediately:**
+Changing an RTD's `Period`, `Cadence Type`, or `N Cadence` doesn't trigger governance right away — the change takes effect at the next daemon startup or daily governance cron. To apply it immediately without waiting: set the RTD's Status to inactive, wait one poll cycle (default 60s), then set it back to Active. The Status → Active transition triggers an immediate governance run that drift-corrects all affected tasks. A one-click Force Governance option is planned as part of the Automation Hub.
+
 **Visual status indicator (formula field):**
 Add a formula field to your task database to see task state at a glance. The formula below concatenates emoji based on task properties — useful as a first column in your board or list view.
 
-Emoji key: ⏰ past due · 🧱 is blocking a task · 🛑 is blocked · 🔁 recurring task · 🤖 has bot note
+Emoji key: ⏰ past due · 🧱 actively blocking an open task · 🛑 blocked by an open task · 🔁 recurring task · 🌿 has parent task · 🌳 has child tasks · 🤖 has bot note
 
 ```
 if(
     and(
         prop("Status") != "Done",
         prop("Status") != "Cancelled"
-    ),
-    if(
-        not empty(prop("Due Date")),
+        ),
         if(
-            or(
-                and(test(format(prop("Due Date")), "AM|PM"), prop("Due Date") < now()),
-                and(not test(format(prop("Due Date")), "AM|PM"), dateAdd(prop("Due Date"), 1, "days") < now())
+            not empty(prop("Due Date")),
+            if(
+                or(
+                    and( test(format(prop("Due Date")), "AM|PM"),prop("Due Date")<now()),
+                    and( not test(format(prop("Due Date")), "AM|PM"),dateAdd(prop("Due Date"),1,"days") < now() )
             ),
             "⏰",
-            ""
+          ""
         ),
         ""
-    ),
+  ),
+  ""
+) + if(and(
+            not empty(prop("Blocking")),
+            prop("is Open")==true
+            ),
+            if(prop("Blocking").map(current.prop("is Open") == true).includes(true),
+                "🧱",
+                ""
+            ),
     ""
-) + if(not empty(prop("Blocking ")), "🧱", "")
-  + if(not empty(prop("Blocked by")), "🛑", "")
-  + if(not empty(prop("Recurring Series")), "🔁", "")
-  + if(not empty(prop("Bot Notes")), "🤖", "")
+) + if(and(
+            not empty(prop("Blocked by")),
+            prop("is Open") == true
+            ),
+            if(prop("Blocked by").map(current.prop("is Open") == true).includes(true),
+                "🛑",
+                ""
+            ),
+    ""
+) + if(not empty(prop("Recurring Series")),
+    "🔁",
+    ""
+) + if(not empty(prop("Parent Task")),
+    "🌿",
+    ""
+) + if(not empty(prop("Child Task")),
+    "🌳",
+    ""
+) + if(not empty(prop("Bot Notes")),
+    "🤖",
+    ""
+)
 ```
 
-Field names must match exactly — including the trailing space in `"Blocking "`. If your field names differ, update the formula accordingly. The overdue check handles both date-only and date+time fields: date+time compares directly to `now()`; date-only adds one day since a date with no time represents the whole day.
+Field names must match your database exactly. The `🧱` and `🛑` indicators depend on an `is Open` formula field (boolean) in your task database:
+
+```
+includes(["Not started", "Todo", "On hold", "In progress"], prop("Status"))
+```
+
+List only your open states here — the field name `is Open` should reflect that: it returns true only for tasks that are still in progress. Update the status option names to match your database. The overdue check handles both date-only and date+time fields: date+time compares directly to `now()`; date-only adds one day since a date with no time represents the whole day.
 
 Note: Notion evaluates all branches of `and()`/`or()` — there is no short-circuit evaluation. Design formulas accordingly.
 
@@ -441,4 +479,4 @@ See `PLANNED.md` for full details.
 - **Automation Hub** — A single Notion page as the daemon's home base. Auto-creates required databases on first run, surfaces health and status information, and eventually replaces `config.toml` for behavioral settings that change frequently.
 - **Notifications** — Outbound webhook support (Discord, Telegram) for alerts on governance events.
 - **Change Tracking** — Opt-in field change log with old/new values and timestamps, feeding into reporting tools.
-- **First Value Field Tracking** — Automatically stamp a `First [Field Name]` column with the first observed value of any configured field.
+- **First Value Field Tracking** — Automatically stamp a `First [Field Name]` column with the first observed value of any configured field. Currently only recording `First Due Date`.

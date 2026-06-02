@@ -4,6 +4,143 @@ Living design document. Sections are deleted when a feature is implemented and i
 
 ---
 
+## Contents
+
+- [Due Date Visibility Throughout Period](#due-date-visibility-throughout-period)
+- [Extended Cadence (Every Y Periods)](#feature-extended-cadence-every-y-periods)
+- [Clear Reminders on Close](#feature-clear-reminders-on-close) _(not pursuing)_
+- [Governance Schema Validation](#improvement-governance-schema-validation)
+- [Schema-Check Safety Net in automations.py](#improvement-schema-check-safety-net-in-automationspy)
+- [RTD Optional Fields — Default Handling](#bug-rtd-optional-fields--default-handling-for-emptyunknown-values)
+- [Configurable Field Inheritance](#feature-configurable-field-inheritance-for-recurring-tasks)
+- [Icon Inheritance from RTD](#feature-icon-inheritance-from-rtd)
+- [Automation Hub](#automation-hub-formerly-project-page)
+- [Notifications](#notifications)
+- [Clear Blocking/Blocked-By on Close](#clear-blockingblocked-by-on-close)
+- [First Value Field Tracking](#first-value-field-tracking)
+- [Timer / Mission Tracking](#timer--mission-tracking)
+- [Automated Testing](#automated-testing)
+- [Bulk Edit Tool](#bulk-edit-tool-tools)
+- [Undeveloped Ideas](#undeveloped-ideas)
+
+---
+
+
+## Due Date Visibility Throughout Period
+
+**Status:** Pre-design
+**One-liner:** Surface recurring tasks in list/board "today" views throughout their active period, not just on the final due date.
+
+### Problem
+Tasks with no Anchor Day/Time get Due Date = end-of-period (e.g. June 30 for a monthly task). In views filtered to "today" or "upcoming", the task is invisible until the last day and can sneak up on the user.
+
+### Options considered
+
+**Option A — Date range Due Date (period start → period end)**
+`_calc_due_date` sets `{"start": period_start, "end": period_end}` instead of `{"start": end_date, "end": None}`. Config toggle per RTD: `due_date_as_range = true`.
+- Grace period is safe: `_get_due_end_or_start()` already prefers `date["end"]` — no grace period impact.
+- Notion Calendar would show the task every day of the period (acceptable trade-off if not using calendar view for RTDs).
+- Open question: does Notion's "today" or "this week" filter reliably match a task where today falls *within* a date range, or does it only match on the start date? Needs testing before committing.
+
+**Option B — Formula field (no bot change)**
+User adds a formula: `and(not empty(prop("Recurring Series")), prop("Due Date") >= now())` and filters their view by it.
+- Zero bot changes; works today; can be documented in README Usage Guide immediately as interim solution.
+- Less discoverable; requires user setup.
+
+### Decisions made so far
+- Grace period logic (`_get_due_end_or_start`) already handles date ranges correctly — end date is used for overdue comparison. No changes needed there for either option.
+- Formula approach (Option B) can be documented in README now, independent of whichever option is implemented.
+
+### Open questions
+- Does Notion's "today" / "this week" filter match a date range where today falls within the range, or only when start = today? (Test before implementing Option A.)
+- Toggle granularity: per-RTD field or per-database config key?
+
+### Dependencies
+- None. Isolated to `_calc_due_date` in `recurring_tasks.py`.
+
+---
+
+## Feature: Extended Cadence (Every Y Periods)
+
+**Status:** Pre-design
+**One-liner:** Support recurring cadences spanning multiple periods (bi-weekly, quarterly, etc.) with a simplified picker for common cadences and a Custom mode for arbitrary X-per-Y configurations.
+
+### Use cases
+- Bi-weekly therapy prep task (1 per 2 weeks)
+- Quarterly oil change (1 per quarter)
+- "3 wrestling tournaments per year" already works today — Exactly N=3, Period=Year
+
+### Fields added / changed
+
+| # | Field | Type | Change | Notes |
+|---|---|---|---|---|
+| 1 | Condition | Select | New (replaces Cadence Type) | `Every` / `At least` / `At most` / `Unlimited` |
+| 2 | Cadence | Select | New | `Every Day` / `Every Week` / `Every 2 Weeks` / `Every Month` / `Every Quarter` / `Every Year` / `Custom` |
+| 3 | X (Custom Cadence) | Number | Rename from `N Cadence` | Task count per Y periods. Only read when Cadence=Custom. |
+| 4 | Y (Custom Cadence) | Number | New | Period multiplier. Only read when Cadence=Custom. |
+| 5 | Period (Custom Cadence) | Select | Rename from `Period` | Day / Week / Month / Quarter / Year. Only read when Cadence=Custom. |
+| 6 | Cadence (Display) | Rich Text | New | Bot-written each governance run. Human-readable full cadence string (e.g. "At least 1 every 2 weeks"). Like Period Target on tasks — display only. |
+| 7 | Current Period Start (Custom Cadence) | Date | New | Bot advances on each new period; user can edit to shift window boundaries. Only meaningful when Y > 1. |
+
+Net-new fields: **3** (Y, Cadence (Display), Current Period Start). Fields 3 and 5 are renames of existing fields.
+
+### Field interaction model
+
+- **Condition=Unlimited**: no cap, no minimum — create a task whenever the prior completes. Bot ignores X, Y, Cadence. Use case: log bad habit occurrences without a period cap. If used with a non-Bad-Habit RTD, log a warning and treat as Every.
+- **Cadence=simple option** (not Custom): X implicitly = 1, Y implicitly = 1, Period derived from the selected option. Custom fields (X, Y, Period) are ignored.
+- **Cadence=Custom**: reads X, Y, Period (Custom Cadence) fields.
+- **Condition applies to both simple and Custom cadences.** "At least 1 every 2 weeks" = Condition: At least + Cadence: Custom, X=1, Y=2, Period=Week.
+- **Quarter** added as a first-class Period option alongside Day, Week, Month, Year.
+
+### Default values and validation
+
+| Field | Invalid / Missing | Action |
+|---|---|---|
+| Condition | Empty or unknown value | Default to `Every`; log WARNING; surface to Hub |
+| Cadence | Empty or unknown value | Log ERROR, skip RTD this governance run; surface to Hub |
+| X (Custom Cadence) | Empty when Cadence=Custom | Default to 1; log WARNING |
+| X (Custom Cadence) | ≤ 0 | Default to 1; log WARNING |
+| Y (Custom Cadence) | Empty when Cadence=Custom | Default to 1; log WARNING |
+| Y (Custom Cadence) | ≤ 0 | Default to 1; log WARNING |
+| Period (Custom Cadence) | Empty when Cadence=Custom | Log ERROR, skip RTD this governance run; surface to Hub |
+| Current Period Start | Future date | Log ERROR, skip RTD this governance run; surface to Hub |
+| Current Period Start | Empty on first activation | Bot writes today as the initial anchor |
+
+Default-value behavior follows the same pattern as existing RTD field defaults (Grace Period, Anchor Day, etc.) — warn and continue where possible; skip and surface where the field is required for correct behavior.
+
+### Period key computation for Y > 1
+
+- Bot steps forward from Current Period Start in increments of `Y × period_length` to find the window containing today.
+- When `today >= Current Period Start + Y × period_length`, bot advances Current Period Start by one interval and creates the next task.
+- Period key format: extend `_period_key()` to embed Y (e.g. `W2-2026-05-19` for a 2-week window starting May 19).
+
+### Decisions made so far
+- **Unlimited in Condition, not Cadence.** Cadence answers "how often?" — all values are period-based. Condition answers "what's the enforcement rule?" — Unlimited fits there.
+- **Current Period Start: future date = halt + Hub warning.** Backward extrapolation would be silent and surprising. The current period must contain today by definition.
+- **Single Current Period Start field** (not two). Bot advances it forward each new period; user can edit mid-period to shift future boundaries. Field description on hover explains the dual role.
+- **Cadence (Display)** bot-written on each governance run.
+- **Quarter** added as first-class Period option.
+
+### Open questions
+- **Anchor Day for Year period**: does `_calc_due_date` currently handle it? Verify before designing behavior for Cadence=Custom + Period=Year + Anchor Day set.
+- **Cadence (Display) write frequency**: every governance run (simple, slightly more API writes) or only on detected change (requires diffing)?
+- **Condition=Unlimited + Cadence interaction**: if Cadence is still set when Condition=Unlimited, does the bot use it to determine how often to create a new tracking task, or fully ignore it? Needs decision.
+
+### Migration
+Breaking changes: Cadence Type → split into Condition + Cadence (select option values change). `N Cadence` → `X (Custom Cadence)`. `Period` → `Period (Custom Cadence)`.
+
+Requires a migration script in `tools/` before shipping:
+1. Read each RTD row: Cadence Type, N Cadence, Period values.
+2. Map to new Condition + Cadence + X + Y + Period. RTDs with N=1 → simple Cadence option. RTDs with N>1 → Cadence=Custom, X=N, Y=1.
+3. Write CSV backup of old values before any writes.
+4. Apply new values.
+
+### Dependencies
+- Governance Schema Validation (PLANNED) — add new fields to the validation table once implemented.
+- RTD Optional Fields Default Handling (PLANNED) — new fields need the same treatment.
+- Automation Hub — Current Period Start future-date warning surfaces in Hub Section 2.
+
+---
 
 ## Feature: Clear Reminders on Close
 
@@ -30,16 +167,16 @@ The only effective mechanism is destructive. The workaround is adequate. Revisit
 ### What gets validated
 
 **RTD database fields:**
-| Field | Expected Type | Value check |
-|---|---|---|
-| Type | select | Options must be a subset of {"Habit", "Responsibility", "Bad Habit"} — warn on any unrecognized value present |
-| Cadence Type | select | Options must be a subset of the known cadence type set — warn on any unrecognized value |
-| Period | select | Options must be a subset of the known period set — warn on any unrecognized value |
-| Status | status | Must include "Active" as an option |
-| N Cadence | number | — |
-| Anchor Day | number | — |
-| Grace Period | number | — |
-| Anchor Time | rich_text | Format check (HH:MM) already warned in _calc_due_date — reference here for completeness |
+| Field        | Expected Type | Value check                                                                                                   |
+| --------------| ---------------| ---------------------------------------------------------------------------------------------------------------|
+| Type         | select        | Options must be a subset of {"Habit", "Responsibility", "Bad Habit"} — warn on any unrecognized value present |
+| Cadence Type | select        | Options must be a subset of the known cadence type set — warn on any unrecognized value                       |
+| Period       | select        | Options must be a subset of the known period set — warn on any unrecognized value                             |
+| Status       | status        | Must include "Active" as an option                                                                            |
+| N Cadence    | number        | —                                                                                                             |
+| Anchor Day   | number        | —                                                                                                             |
+| Grace Period | number        | —                                                                                                             |
+| Anchor Time  | rich_text     | Format check (HH:MM) already warned in _calc_due_date — reference here for completeness                       |
 
 **Task table fields (bot-managed):**
 | Field | Expected Type |
@@ -156,6 +293,26 @@ Hardcoded invariants (`FIELDS_NOT_INHERITED`, `_READONLY_PROP_TYPES`) remain in 
 
 ---
 
+## Feature: Icon Inheritance from RTD
+
+**Status:** Ready to implement
+**One-liner:** When the bot creates a recurring task, copy the RTD's icon (emoji or external image) to the new task so task instances carry consistent series branding automatically.
+
+### Decisions made
+- Source is always the RTD icon — same logic as Name. Users who want a one-off icon change can edit the task instance; it does not carry forward.
+- `file` type icons (Notion-hosted uploads) are skipped — the hosted URL may not be reliably writable via the API. Only `emoji` and `external` types are copied.
+- If the RTD has no icon set, the task is created without one (no change to current behavior).
+
+### Implementation
+1. Read `definition.get("icon")` from the RTD page object after fetching it.
+2. If icon is not `None` and type is not `"file"`: pass it to `create_page`.
+3. Add optional `icon` parameter to `create_page` in `notion_api.py`; include `"icon": icon` in the POST body when provided.
+4. Notion_API patch version bump required.
+
+### Dependencies
+- Minor update to `create_page` in `Notion_API` (add `icon` param to POST body).
+
+---
 
 ## Automation Hub (formerly "Project Page")
 
@@ -215,16 +372,16 @@ Notion does not have a native field-selector property type (the relation/rollup 
 All non-formula/non-rollup fields: Type (select, pre-populated options), Cadence Type (select), Period (select), Status (status with "Active"), N Cadence (number), Anchor Day (number), Grace Period (number), Anchor Time (rich_text), plus the relation field pointing to the task database. Each field is created with a description (Notion API supports property descriptions) so the database is self-documenting out of the box.
 
 **RTD field descriptions (to include in create_database call):**
-| Field | Description |
-|---|---|
-| Type | Governs task behavior. Habit = repeats whether done or not; Responsibility = repeats only when completed; Bad Habit = tracks things to limit (use with "At most N per period"). |
-| Cadence Type | How tasks recur per period. "Exactly N" = strict count; "Minimum N" = at least N, more welcome; "At most N" = cap, Bad Habit only. |
-| Period | The recurring cycle length (Daily, Weekly, Monthly, etc.). |
-| N Cadence | Tasks to create per period. Leave blank for 1. |
-| Anchor Day | Day to anchor the due date (1=Mon … 7=Sun for weekly; day of month for monthly). Leave blank for end-of-period. |
-| Anchor Time | Due time in HH:MM (24-hour). Leave blank for no specific time. |
-| Grace Period | Days after due date before the bot cancels an incomplete task. Leave blank to cancel on the due date. |
-| Status | Set to Active to enable governance for this definition. |
+| Field        | Description                                                                                                                                                                     |
+| --------------| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Type         | Governs task behavior. Habit = repeats whether done or not; Responsibility = repeats only when completed; Bad Habit = tracks things to limit (use with "At most N per period"). |
+| Cadence Type | How tasks recur per period. "Exactly N" = strict count; "Minimum N" = at least N, more welcome; "At most N" = cap, Bad Habit only.                                              |
+| Period       | The recurring cycle length (Daily, Weekly, Monthly, etc.).                                                                                                                      |
+| N Cadence    | Tasks to create per period. Leave blank for 1.                                                                                                                                  |
+| Anchor Day   | Day to anchor the due date (1=Mon … 7=Sun for weekly; day of month for monthly). Leave blank for end-of-period.                                                                 |
+| Anchor Time  | Due time in HH:MM (24-hour). Leave blank for no specific time.                                                                                                                  |
+| Grace Period | Days after due date before the bot cancels an incomplete task. Leave blank to cancel on the due date.                                                                           |
+| Status       | Set to Active to enable governance for this definition.                                                                                                                         |
 
 **User completes manually (bot provides instructions):**
 - "Is Open" formula on the task table — syntax depends on the user's Status field option names, so cannot be auto-generated reliably
@@ -250,6 +407,19 @@ All non-formula/non-rollup fields: Type (select, pre-populated options), Cadence
 
 ### Deliverables
 - `docs/recurring-task-usage-guide.md` — Notion-importable markdown guide for recurring task configuration. Self-contained; no links to code or version-specific internals. Avoid heavy table use (Notion markdown import renders tables inconsistently). Scope: how to configure your first RTD, common patterns, non-obvious behaviors. Distinct from the README Usage Guide (which is for technical readers of the tool docs). Include a section on `day_start_hour` — explain that tasks closed before `day_start_hour` count toward the previous day's period, and give guidance for extreme circadian rhythms.
+
+### Force Governance checkbox
+
+A checkbox field on the Hub page itself (not per-RTD). On each poll, the daemon checks this field. If checked: trigger `run_governance()`, uncheck it, log that a user-initiated governance run fired.
+
+**Rationale:** RTD config changes (Period, Cadence Type, N Cadence) don't trigger governance immediately — they take effect at the next startup or daily cron. The deactivate/reactivate workaround works but requires two edits and a polling wait. A single checkbox is cleaner and more discoverable. Global scope (all RTDs) is acceptable — the use case is almost always "I just changed something, apply it now."
+
+**Placement:** Section 3 (Bot Health) or as a standalone field near the top of the Hub page.
+
+**Implementation notes:**
+- Daemon reads Hub page properties each poll (already needed for other Hub features).
+- If Force Governance is checked: call `run_governance(client)`, then write `False` back to the checkbox via `client.update_page_properties()`.
+- Log at INFO: `"Force governance triggered by user via Automation Hub."`
 
 ### Open questions
 - Status dashboard write frequency: governance runs only (startup + daily governance cron) to avoid excessive API writes.
@@ -320,17 +490,17 @@ All non-formula/non-rollup fields: Type (select, pre-populated options), Cadence
 - **Breaking change:** `due_date_tracking = true` is replaced. Existing users must update `config.toml`. Add to deploy prerequisites when this ships.
 - **Type support:**
 
-  | Type | Supported | Notes |
-  |---|---|---|
-  | `date` | Yes | native date field |
-  | `number` | Yes | native number field |
-  | `select` | Yes | store option name as text |
-  | `status` | Yes | store option name as text (no group — group is inferable from option name) |
-  | `text` | Yes | native text field |
-  | `url` / `email` / `phone` | Yes | store as text |
-  | `checkbox` | **No** | default `false` is indistinguishable from untouched |
-  | `multi_select` | **No** | too complex for v1 |
-  | `rich_text` / `files` / `relation` / `formula` / `rollup` / `people` | **No** | excluded |
+| Type                                                                 | Supported | Notes                                                                      |
+| ----------------------------------------------------------------------| -----------| ----------------------------------------------------------------------------|
+| `date`                                                               | Yes       | native date field                                                          |
+| `number`                                                             | Yes       | native number field                                                        |
+| `select`                                                             | Yes       | store option name as text                                                  |
+| `status`                                                             | Yes       | store option name as text (no group — group is inferable from option name) |
+| `text`                                                               | Yes       | native text field                                                          |
+| `url` / `email` / `phone`                                            | Yes       | store as text                                                              |
+| `checkbox`                                                           | **No**    | default `false` is indistinguishable from untouched                        |
+| `multi_select`                                                       | **No**    | too complex for v1                                                         |
+| `rich_text` / `files` / `relation` / `formula` / `rollup` / `people` | **No**    | excluded                                                                   |
 
 - **Write-once:** once `First [Field]` is stamped, the bot never overwrites it. If the user manually clears it, the bot re-stamps on the next poll (same as First Due Date today).
 - **Does not increment any counter.** Purely a snapshot of the first observed value.
@@ -408,3 +578,13 @@ Power BI is read-only — no write-back possible. When analysis reveals data tha
 
 ### Dependencies
 - None. Standalone script using existing `notion_api.py`.
+
+---
+
+## Undeveloped Ideas
+
+Ideas raised but not designed. No open questions analyzed — revisit when the relevant feature area is active.
+
+- **Specific Days (Recurring Tasks, multi-day per week)** — One RTD creates tasks on specific weekdays (e.g., Tuesday AND Thursday club meetings). Currently handled by two RTDs (one per day), which is clean and keeps tracking streams separate. Implementing this would require governance to create N tasks per week, one per selected day — a significant change to the governance loop. Two-RTD workaround is the current recommendation.
+
+- **New Anchor Types (Recurring Tasks)** — Apple Calendar-style rules for RTDs: "First Monday of the month", "Last weekday of the month", "Second Tuesday". Anchor Day on the RTD currently handles day-of-month (1–31) for monthly tasks. Supporting ordinal weekday logic ("nth weekday within a period") would require a new anchor type field on the RTD and additional calendar math. Dependency: Extended Cadence feature should land first since it touches the same period/anchor system.

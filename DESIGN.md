@@ -626,6 +626,9 @@ Resolved design decisions. Each entry states the rule and the reason so future c
 **[Fields] `Manual Created Date` is user-managed only — bot never writes it.**
 - Reason: used for retroactively created tasks where the user wants accurate reporting dates. No bot logic depends on it.
 
+**[Fields] Recurring task Name always comes from the RTD title, not the previous task.**
+- Reason: `base_props` (which includes the RTD-derived Name) wins the `_copy_task_fields` merge. This is intentional — the RTD title is the canonical series name. Users who want a one-off rename can edit the task instance; the change does not carry forward to the next task.
+
 **[RTD Start Date] Automated RTD activation via a Start Date field is not implemented.**
 - User activates RTDs manually by setting Status to Active. The manual step is lightweight.
 - The motivating use cases (returning from vacation, seasonal responsibilities) are better served by reminder tasks the user already creates.
@@ -720,6 +723,7 @@ Resolved design decisions. Each entry states the rule and the reason so future c
 - Governance drift-corrects Period Key, Occurrence #, and Period Target on all tasks in the current and future periods on every pass. An RTD config change is fully reflected after the next startup, governance cron, or RTD activation trigger — no `--reconcile` needed for current/future tasks.
 - Historical closed tasks (periods before the current period) are not corrected by normal governance. Use `--reconcile` if historical records also need correction.
 - Due Dates on existing open tasks are not rewritten — only newly created tasks get Due Dates computed from the new settings. An open task may retain a Due Date from the old period granularity; it will close normally and the replacement task will have the correct Due Date.
+- **Workaround for immediate application:** set RTD Status → inactive, wait one poll cycle, set back to Active. The Status → Active transition triggers an immediate governance run. A dedicated Force Governance checkbox on the Automation Hub is planned — see PLANNED.md.
 
 **[Instance #] Assigned by COUNT of existing tasks, not MAX+1.**
 - Reason: MAX+1 creates gaps or inflated numbers if a user edits Instance # values directly. COUNT of related tasks for this RTD in the current period is resilient to user edits — the value of Instance # on existing tasks is irrelevant, only the count matters.
