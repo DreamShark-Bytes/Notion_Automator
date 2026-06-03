@@ -708,9 +708,17 @@ def _create_next_task(
 
     # Upsert closed_task into fetched_tasks so it reflects its current (just-closed) state.
     # The API query above may have captured it before the status change propagated.
+    # If no Closed Date yet (auto_closed_date hasn't written it), inject now so
+    # _task_in_period attributes this task to the correct period (closure time, not Due Date).
     if closed_task is not None:
-        fetched_tasks = [t for t in fetched_tasks if t["id"] != closed_task["id"]]
-        fetched_tasks.append(closed_task)
+        ct = closed_task
+        if not _get_date(ct, "Closed Date"):
+            ct = {**closed_task, "properties": {
+                **closed_task.get("properties", {}),
+                "Closed Date": {"type": "date", "date": {"start": now.isoformat(), "end": None}},
+            }}
+        fetched_tasks = [t for t in fetched_tasks if t["id"] != ct["id"]]
+        fetched_tasks.append(ct)
 
     # Determine whether the new task targets the current period or the next one.
     if closed_task is None:
