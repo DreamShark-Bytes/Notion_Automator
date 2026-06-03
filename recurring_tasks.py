@@ -366,8 +366,19 @@ def _calc_due_date(
     task_type: str | None = None,
     def_id: str | None = None,
     cadence_n: float | None = None,
+    now: datetime | None = None,
 ) -> dict | None:
-    """Return a Notion date property dict for the new task's Due Date, or None."""
+    """Return a Notion date property dict for the new task's Due Date, or None.
+
+    Due Dates are date ranges that span the task's full logical period, adjusted
+    for day_start_hour, so tasks are visible in Notion throughout their active period:
+      start: period_start @ day_start_hour
+      end:   next_period_start @ day_start_hour − 1 minute
+
+    AnchorTime overrides to a single point-in-time (no end). AnchorDay narrows
+    the range to that specific day within a Week/Month period. For Period=Day,
+    AnchorTime alone sets the due time with no end.
+    """
     if cadence_type == "Unlimited" or not period:
         return None
     if task_type in ("Habit", "Bad Habit"):
@@ -399,48 +410,78 @@ def _calc_due_date(
         anchor_day = None
         anchor_time = None
 
-    now = datetime.now().astimezone()
-    target, end = _period_dates(period, anchor_day, use_next_period, now)
+    if now is None:
+        now = datetime.now().astimezone()
 
-    # If anchor day is in the current period but has already passed, fall back to
-    # end of period so the task isn't immediately overdue. (The past-period case is
-    # handled upstream in _create_next_task by advancing use_next_period=True, so
-    # by the time we reach here, a past target always means same-period anchor passed.)
-    if anchor_day and not use_next_period and target.date() < now.date():
-        _, period_end = _period_dates(period, None, False, now)
-        target = period_end if period_end is not None else now.replace(hour=0, minute=0, second=0, microsecond=0)
+    # Shift 'now' back by day_start_hour so times between midnight and day_start_hour
+    # are attributed to the previous logical period (the same offset used by _period_key).
+    adjusted_now = _period_dt(now)
 
-    if anchor_day and anchor_time:
-        # Specific day + time
-        try:
-            hour, minute = (int(p) for p in anchor_time.strip().split(":"))
-            dt = target.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            return {"date": {"start": dt.isoformat(), "end": None}}
-        except Exception:
-            logger.warning(f"Could not parse anchor_time '{anchor_time}' — falling back to date only.")
-            if def_id:
-                add_bot_note(def_id, RTD_INVALID_ANCHOR_TIME,
-                             f"Anchor Time '{anchor_time}' could not be parsed (expected HH:MM). Due Date set to date only.")
-            return {"date": {"start": target.strftime("%Y-%m-%d"), "end": None}}
+    # Get the period-start date (midnight-anchored) for the target period.
+    target, _ = _period_dates(period, anchor_day, use_next_period, adjusted_now)
 
-    if anchor_day and not anchor_time:
-        return {"date": {"start": target.strftime("%Y-%m-%d"), "end": None}}
+    # If anchor day has already passed in the current period, fall back to a full
+    # period range — the task remains visible for the rest of the period and won't
+    # appear immediately overdue. (The past-period case is handled upstream in
+    # _create_next_task by advancing use_next_period=True before we reach here.)
+    if anchor_day and not use_next_period and target.date() < adjusted_now.date():
+        anchor_day = None
+        target, _ = _period_dates(period, None, False, adjusted_now)
 
-    # No anchor day — use end of period as due date (avoids spanning the full period on calendar).
-    # Day period has no end (end=None), so fall back to target (today/tomorrow).
-    end_date = end if end is not None else target
+    # start_dt: first moment of the period (or anchor day) at day_start_hour.
+    # target is always midnight-anchored from _period_dates, so this is exact.
+    start_dt = target + timedelta(hours=_day_start_hour)
+
+    def _parse_anchor_time(s: str) -> tuple[int, int]:
+        h, m = (int(p) for p in s.strip().split(":"))
+        return h, m
+
+    if anchor_day:
+        if anchor_time:
+            # Rule 5: specific anchor day + specific time → single point-in-time
+            try:
+                h, m = _parse_anchor_time(anchor_time)
+                return {"date": {"start": target.replace(hour=h, minute=m, second=0, microsecond=0).isoformat(), "end": None}}
+            except Exception:
+                logger.warning(f"Could not parse anchor_time '{anchor_time}' — falling back to single-day range.")
+                if def_id:
+                    add_bot_note(def_id, RTD_INVALID_ANCHOR_TIME,
+                                 f"Anchor Time '{anchor_time}' could not be parsed (expected HH:MM). Due Date set to day range.")
+        # Rule 4: anchor day, no anchor time → single-day range spanning that anchor day
+        end_dt = start_dt + timedelta(days=1) - timedelta(minutes=1)
+        return {"date": {"start": start_dt.isoformat(), "end": end_dt.isoformat()}}
+
     if anchor_time:
-        # Anchor time with no anchor day: apply time to end-of-period date.
-        try:
-            hour, minute = (int(p) for p in anchor_time.strip().split(":"))
-            dt = end_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            return {"date": {"start": dt.isoformat(), "end": None}}
-        except Exception:
-            logger.warning(f"Could not parse anchor_time '{anchor_time}' — falling back to date only.")
-            if def_id:
-                add_bot_note(def_id, RTD_INVALID_ANCHOR_TIME,
-                             f"Anchor Time '{anchor_time}' could not be parsed (expected HH:MM). Due Date set to date only.")
-    return {"date": {"start": end_date.strftime("%Y-%m-%d"), "end": None}}
+        if period == "Day":
+            # Rule 3: Period=Day + anchor time → point-in-time on the logical day (no end)
+            try:
+                h, m = _parse_anchor_time(anchor_time)
+                return {"date": {"start": target.replace(hour=h, minute=m, second=0, microsecond=0).isoformat(), "end": None}}
+            except Exception:
+                logger.warning(f"Could not parse anchor_time '{anchor_time}' — falling back to full-day range.")
+                if def_id:
+                    add_bot_note(def_id, RTD_INVALID_ANCHOR_TIME,
+                                 f"Anchor Time '{anchor_time}' could not be parsed (expected HH:MM). Due Date set to day range.")
+        else:
+            # Anchor time without anchor day for non-Day periods: apply to end-of-period date.
+            # (Intended use is AnchorTime + AnchorDay; this is a configuration edge case.)
+            next_target, _ = _period_dates(period, None, True, target)
+            period_end_date = next_target - timedelta(days=1)
+            try:
+                h, m = _parse_anchor_time(anchor_time)
+                dt = period_end_date.replace(hour=h, minute=m, second=0, microsecond=0)
+                return {"date": {"start": dt.isoformat(), "end": None}}
+            except Exception:
+                logger.warning(f"Could not parse anchor_time '{anchor_time}' — falling back to full period range.")
+                if def_id:
+                    add_bot_note(def_id, RTD_INVALID_ANCHOR_TIME,
+                                 f"Anchor Time '{anchor_time}' could not be parsed (expected HH:MM). Due Date set to period range.")
+
+    # Rule 1 / Rule 2: full period range — start at day_start_hour, end at next period start − 1 min.
+    next_target, _ = _period_dates(period, None, True, target)
+    next_start_dt = next_target + timedelta(hours=_day_start_hour)
+    end_dt = next_start_dt - timedelta(minutes=1)
+    return {"date": {"start": start_dt.isoformat(), "end": end_dt.isoformat()}}
 
 
 # ------------------------------------------------------------------ #
@@ -632,9 +673,10 @@ def _get_due_end_or_start(page: dict) -> datetime | None:
         return None
 
 
-def _is_overdue_by(due: datetime, grace_days: float) -> bool:
-    now = datetime.now().astimezone()
-    return (now - due).days > grace_days
+def _is_overdue_by(due: datetime, grace_days: float, now: datetime | None = None) -> bool:
+    if now is None:
+        now = datetime.now().astimezone()
+    return (now - due) > timedelta(days=grace_days)
 
 
 def _period_start(period: str | None, now: datetime) -> datetime:
@@ -765,7 +807,7 @@ def _create_next_task(
                 target_date, _ = _period_dates(period, anchor_day, True, now)
             # else: anchor day was in the current period but has already passed
             # (e.g. Wed 5/20 when today is Sat 5/23). Keep current period;
-            # _calc_due_date will fall back to end-of-period for the due date.
+            # _calc_due_date will fall back to a full period range in this case.
         target_period_key = _period_key(period, target_date)
     else:
         target_period_key = current_period_key
@@ -1299,14 +1341,12 @@ def auto_recurring_tasks(client: "NotionClient", page: dict, prev_page: dict | N
     prev_group = _get_status_group(client, prev_page, "Status")
 
     # Transition into Complete — create the next task.
-    # Guard: skip non-completion statuses (cancelled, skipped, missed, etc.).
-    # Governance auto-cancels overdue tasks and immediately creates the replacement;
-    # the live poll would otherwise also fire and create a duplicate.
+    # Applies to both normal completions and manual cancellations. The duplicate
+    # guard in _create_next_task prevents double-creation when governance already
+    # created a replacement in the same pass (e.g. auto-cancel of an overdue task).
     if prev_page is not None and current_group == "Complete" and prev_group != "Complete":
-        if _normalize_status(_get_status(page, "Status")) in NON_COMPLETION_STATUSES:
-            logger.info(f"Recurring task {page['id']} was skipped/cancelled — skipping new task creation.")
-            return {}
-        logger.info(f"Recurring task {page['id']} completed — creating next task.")
+        action = "cancelled" if _normalize_status(_get_status(page, "Status")) in NON_COMPLETION_STATUSES else "completed"
+        logger.info(f"Recurring task {page['id']} {action} — creating next task.")
         new_page = _create_next_task(client, page, definition)
         created = [new_page] if new_page is not None else []
         return {BOT_CREATED_PAGES_KEY: created}
