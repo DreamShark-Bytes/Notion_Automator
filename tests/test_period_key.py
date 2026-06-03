@@ -7,7 +7,7 @@ midnight and day_start_hour belong to the previous logical period.
 All tests call init() to set module state before running.
 """
 import pytest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import recurring_tasks
 
 
@@ -125,3 +125,41 @@ class TestPeriodKeyYear:
     def test_jan_first_before_boundary(self):
         dt = local_dt(2026, 1, 1, 2, 0)
         assert recurring_tasks._period_key("Year", dt) == "2025"
+
+
+class TestNewTaskPeriodKeyAtBoundary:
+    """Regression for bug where _create_next_task computed target_period_key by
+    passing the midnight-anchored output of _period_dates directly to _period_key.
+    At day_start_hour=3, midnight shifts back into the previous period, causing
+    new tasks created at the 3am boundary to get yesterday's period key.
+
+    Fix: use _period_key(period, now) for current period; for next period, add
+    day_start_hour+1min to target_date so _period_key lands in the correct day.
+    """
+
+    def setup_method(self):
+        recurring_tasks.init("fake-def-id", "fake-tasks-id", week_start_day=0, day_start_hour=3)
+
+    def test_midnight_input_maps_to_previous_day(self):
+        # Documents why _period_dates output can't be passed directly to _period_key.
+        # midnight June 3 - 3h = 9pm June 2 → period key is June 2, not June 3.
+        midnight_june3 = local_dt(2026, 6, 3, 0, 0)
+        assert recurring_tasks._period_key("Day", midnight_june3) == "2026-06-02"
+
+    def test_now_at_boundary_gives_correct_current_period(self):
+        # At exactly day_start_hour, using now directly yields the correct current period.
+        now = local_dt(2026, 6, 3, 3, 0)
+        assert recurring_tasks._period_key("Day", now) == "2026-06-03"
+
+    def test_next_period_target_shifted_by_day_start_hour(self):
+        # For use_next_period=True: target_date (midnight June 4) + day_start_hour+1min
+        # lands at 3:01am June 4, which _period_key correctly maps to June 4.
+        now = local_dt(2026, 6, 3, 3, 0)
+        target_date, _ = recurring_tasks._period_dates("Day", None, True, now)
+        assert recurring_tasks._period_key("Day", target_date + timedelta(hours=3, minutes=1)) == "2026-06-04"
+
+    def test_next_period_at_month_boundary(self):
+        # Same fix holds across month boundaries.
+        now = local_dt(2026, 5, 31, 3, 0)
+        target_date, _ = recurring_tasks._period_dates("Day", None, True, now)
+        assert recurring_tasks._period_key("Day", target_date + timedelta(hours=3, minutes=1)) == "2026-06-01"

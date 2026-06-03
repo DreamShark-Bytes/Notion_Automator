@@ -95,7 +95,8 @@ if _is_cron_time(last_cron_run, hour=2):
 | Flag | Description |
 |---|---|
 | `--debug` | Enables verbose API request/response logging. For manual runs only. |
-| `--governance` | Runs the automations init pass and all GOVERNANCE functions once, then exits. Useful for testing or forcing an out-of-schedule governance run without starting the poll loop. |
+| `--governance-only` | Runs the automations init pass and all GOVERNANCE functions once, then exits. Useful for testing or forcing an out-of-schedule governance run without starting the poll loop. |
+| `--reconcile` | Force-writes Period Key, Occurrence #, and Period Target on ALL recurring tasks (including historical periods), then exits. Use after changing RTD config or to correct historical records. Normal governance only corrects current/future periods; `--reconcile` is the tool for history. |
 
 ---
 
@@ -507,12 +508,12 @@ The governance cron is **not a separate process** — it is a time-triggered run
 
 Functions that need to run at the period boundary belong in the existing registries — no new infrastructure is needed:
 
-| Responsibility | Where it lives | Called via |
-|---|---|---|
-| Grace period auto-close | function in `GOVERNANCE` | `run_governance` |
+| Responsibility               | Where it lives           | Called via       |
+| ------------------------------| --------------------------| ------------------|
+| Grace period auto-close      | function in `GOVERNANCE` | `run_governance` |
 | Future-period task promotion | function in `GOVERNANCE` | `run_governance` |
 | Tasks Done This Period reset | function in `GOVERNANCE` | `run_governance` |
-| Current Period field update | function in `GOVERNANCE` | `run_governance` |
+| Current Period field update  | function in `GOVERNANCE` | `run_governance` |
 
 #### Period boundary behavior
 
@@ -759,6 +760,19 @@ Resolved design decisions. Each entry states the rule and the reason so future c
 - Governance function signature: `fn(client: NotionClient) -> None`. Each function fetches its own data.
 - Runs globally (once at startup, not per-database) — per-database governance is not supported; complexity without a demonstrated need.
 - `daemon.py` calls `run_governance(client)` (formerly `run_governance_functions`) which iterates `GOVERNANCE`, replacing the hardcoded `run_recurring_governance(client)` call.
+
+**[Due Date range] Due Dates are datetime ranges spanning the full logical period, adjusted for day_start_hour.**
+- start: period_start @ day_start_hour (e.g. June 3 @ 3:00am for a daily task)
+- end: next_period_start @ day_start_hour − 1 minute (e.g. June 4 @ 2:59am)
+- AnchorTime overrides to a single point-in-time (no end). AnchorDay (Week/Month) narrows the range to that single day within the period. Period=Day + AnchorTime = point-in-time for that logical day. AnchorDay + AnchorTime = point-in-time on that anchor day.
+- `_calc_due_date` applies `_period_dt()` offset before computing the target date, so tasks created between midnight and day_start_hour receive the previous logical period's date, not the calendar date.
+- `_is_overdue_by` uses timedelta comparison (not `.days`) so period-range end times (e.g. 2:59am) are correctly seen as overdue at the next governance run (3:00am).
+- This also makes tasks visible in Notion "today" views throughout their full active period (Option A from the pre-design — the open question about Notion filter behavior was resolved by implementation: Notion matches date ranges where today falls within the range).
+- Transition: existing tasks with old date-only Due Dates self-correct on the next governance run. Responsibility tasks may briefly have one extra open task; auto-cancelled immediately.
+
+**[Manual cancel trigger] Manually cancelling a recurring task now immediately creates a replacement.**
+- Previous behavior: `auto_recurring_tasks` skipped task creation for `NON_COMPLETION_STATUSES` (cancelled, skipped, etc.) to prevent duplicate creation when governance auto-cancelled. This also silently suppressed user-initiated cancellations.
+- Fix: removed the `NON_COMPLETION_STATUSES` guard. The duplicate guard in `_create_next_task` (which queries fresh tasks and skips if an open task already exists for the target period) prevents double-creation when governance already created a replacement in the same pass.
 
 ### Bug Fixes & Code Changes
 

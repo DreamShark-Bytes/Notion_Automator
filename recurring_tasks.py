@@ -598,13 +598,12 @@ def _task_in_period(
         if dt and period:
             return _period_key(period, dt) == current_period_key
         return False
-    # Open task (no Closed Date): use Due Date; fall back to now.
+    # Open task (no Closed Date): use Due Date end (or start); fall back to now.
     # Closed tasks always have Closed Date set by auto_closed_date governance before this runs.
-    due_str = _get_date(task, "Due Date")
     now = datetime.now().astimezone()
     if period:
-        pk_dt = (_parse_closed_dt(due_str) if due_str else None) or now
-        return _period_key(period, pk_dt) == current_period_key
+        due_dt = _get_due_end_or_start(task) or now
+        return _period_key(period, due_dt) == current_period_key
     return False
 
 
@@ -808,7 +807,14 @@ def _create_next_task(
             # else: anchor day was in the current period but has already passed
             # (e.g. Wed 5/20 when today is Sat 5/23). Keep current period;
             # _calc_due_date will fall back to a full period range in this case.
-        target_period_key = _period_key(period, target_date)
+        # _period_dates returns midnight-anchored dates. Passing midnight to _period_key
+        # shifts it back by day_start_hour into the previous period. Use now directly
+        # for the current period; add day_start_hour+1min to target_date for next period
+        # so _period_key lands firmly inside the correct logical day.
+        if use_next_period:
+            target_period_key = _period_key(period, target_date + timedelta(hours=_day_start_hour, minutes=1))
+        else:
+            target_period_key = _period_key(period, now)
     else:
         target_period_key = current_period_key
 
@@ -823,10 +829,9 @@ def _create_next_task(
                 continue  # completed — not a duplicate
             if _normalize_status(_get_status(t, "Status")) in NON_COMPLETION_STATUSES:
                 continue  # cancelled/skipped — not a duplicate
-            t_due = _get_date(t, "Due Date")
-            if t_due and period:
-                pk_dt = _parse_closed_dt(t_due) or now
-                t_pk = _period_key(period, pk_dt)
+            due_dt = _get_due_end_or_start(t)
+            if due_dt and period:
+                t_pk = _period_key(period, due_dt)
             else:
                 t_pk = _period_key(period, now) if period else ""
             if t_pk == target_period_key:
@@ -1009,14 +1014,11 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
                     due = _get_due_end_or_start(task)
                     if not due:
                         continue
-                    # Derive task's period from Due Date start — used by "Minimum N" archive logic
-                    # to count completions in the task's period. Overdue check uses end date
-                    # (via _get_due_end_or_start) so user-set date ranges are respected.
-                    # The stored Period Key field is never read here — it may be corrupted.
+                    # Derive task's period from Due Date end (or start) — consistent with how
+                    # all other governance period attribution works. The stored Period Key field
+                    # is never read here — it may be corrupted.
                     if period:
-                        due_str = _get_date(task, "Due Date")
-                        pk_dt = (_parse_closed_dt(due_str) if due_str else None) or now
-                        task_pk = _period_key(period, pk_dt)
+                        task_pk = _period_key(period, _get_due_end_or_start(task) or now)
                     else:
                         task_pk = None
                     if _is_overdue_by(due, grace):
@@ -1073,7 +1075,7 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
         # We only create a new task when NO open task covers the current period.
         if current_period_key:
             has_current_period_task = any(
-                _period_key(period, _parse_closed_dt(_get_date(t, "Due Date")) or now) == current_period_key
+                _period_key(period, _get_due_end_or_start(t) or now) == current_period_key
                 for t in remaining_open
             ) if period else bool(remaining_open)
         else:
@@ -1123,7 +1125,7 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
             logger.info(f"Recurring governance: no open task for '{def_name}' in current period — creating one.")
             # If this period's task was auto-cancelled, use it as the inheritance source.
             # Pick the cancelled task with the most recent Due Date as the reference.
-            ref_task = max(cancelled_tasks, key=lambda t: _get_date(t, "Due Date") or "") if cancelled_tasks else None
+            ref_task = max(cancelled_tasks, key=lambda t: _get_due_end_or_start(t) or now) if cancelled_tasks else None
             new_page = _create_next_task(client, ref_task, definition, force_next_period=force_next)
             if new_page:
                 created_pages.append(new_page)
@@ -1140,11 +1142,11 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
 
             def _task_pk(task: dict) -> str:
                 closed = _get_date(task, "Closed Date")
-                due = _get_date(task, "Due Date")
                 if closed and period:
                     return _period_key(period, _parse_closed_dt(closed) or now)
-                if due and period:
-                    return _period_key(period, _parse_closed_dt(due) or now)
+                due_dt = _get_due_end_or_start(task)
+                if due_dt and period:
+                    return _period_key(period, due_dt)
                 return current_period_key or ""
 
             # Group ALL tasks by period.
@@ -1153,15 +1155,18 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
                 tasks_by_period.setdefault(_task_pk(task), []).append(task)
 
             for group_pk, group_tasks in tasks_by_period.items():
-                # Sort oldest-first by Closed Date (if set), otherwise Due Date.
+                # Sort oldest-first by Closed Date (if set), otherwise Due Date end (or start).
+                # Using Due Date end ensures open tasks sort after any cancelled tasks that share
+                # the same period slot, keeping Occurrence # stable across governance passes.
                 # Tasks with neither date go at the end in arbitrary order.
                 # Occurrence # starts at 1 and increments only for non-cancelled tasks,
                 # so a cancelled task shares the same slot number as the task that follows it.
                 def _occ_sort_key(t: dict) -> tuple:
                     closed = _get_date(t, "Closed Date")
-                    due = _get_date(t, "Due Date")
-                    date_str = closed or due
-                    return (0, date_str) if date_str else (1, "")
+                    if closed:
+                        return (0, closed)
+                    due_dt = _get_due_end_or_start(t)
+                    return (0, due_dt.isoformat()) if due_dt else (1, "")
 
                 is_cancelled_fn = lambda t: _normalize_status(_get_status(t, "Status")) in NON_COMPLETION_STATUSES
                 ordered = sorted(group_tasks, key=_occ_sort_key)
@@ -1206,11 +1211,11 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
 
             def _gov_task_pk(task: dict) -> str:
                 closed = _get_date(task, "Closed Date")
-                due = _get_date(task, "Due Date")
                 if closed and period:
                     return _period_key(period, _parse_closed_dt(closed) or now)
-                if due and period:
-                    return _period_key(period, _parse_closed_dt(due) or now)
+                due_dt = _get_due_end_or_start(task)
+                if due_dt and period:
+                    return _period_key(period, due_dt)
                 return current_period_key or ""
 
             tasks_by_period: dict[str, list] = {}
@@ -1223,9 +1228,10 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
 
             def _gov_sort_key(t: dict) -> tuple:
                 closed = _get_date(t, "Closed Date")
-                due = _get_date(t, "Due Date")
-                date_str = closed or due
-                return (0, date_str) if date_str else (1, "")
+                if closed:
+                    return (0, closed)
+                due_dt = _get_due_end_or_start(t)
+                return (0, due_dt.isoformat()) if due_dt else (1, "")
 
             is_cancelled_fn = lambda t: (
                 t["id"] in cancelled_ids
@@ -1371,11 +1377,7 @@ def auto_recurring_tasks(client: "NotionClient", page: dict, prev_page: dict | N
             # Derive Period Key from the task's Due Date when available, so a manually
             # created task with a past Due Date lands in the correct period rather than
             # the current one. Fall back to now when Due Date is absent.
-            existing_due = _get_date(page, "Due Date")
-            if existing_due and period:
-                pk_dt = _parse_closed_dt(existing_due) or now
-            else:
-                pk_dt = now
+            pk_dt = _get_due_end_or_start(page) or now
             current_pk = _period_key(period, pk_dt) if period else None
 
             task_type = _get_select(definition, "Type")

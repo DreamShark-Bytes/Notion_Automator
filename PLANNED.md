@@ -26,39 +26,6 @@ Living design document. Sections are deleted when a feature is implemented and i
 ---
 
 
-## Due Date Visibility Throughout Period
-
-**Status:** Pre-design
-**One-liner:** Surface recurring tasks in list/board "today" views throughout their active period, not just on the final due date.
-
-### Problem
-Tasks with no Anchor Day/Time get Due Date = end-of-period (e.g. June 30 for a monthly task). In views filtered to "today" or "upcoming", the task is invisible until the last day and can sneak up on the user.
-
-### Options considered
-
-**Option A — Date range Due Date (period start → period end)**
-`_calc_due_date` sets `{"start": period_start, "end": period_end}` instead of `{"start": end_date, "end": None}`. Config toggle per RTD: `due_date_as_range = true`.
-- Grace period is safe: `_get_due_end_or_start()` already prefers `date["end"]` — no grace period impact.
-- Notion Calendar would show the task every day of the period (acceptable trade-off if not using calendar view for RTDs).
-- Open question: does Notion's "today" or "this week" filter reliably match a task where today falls *within* a date range, or does it only match on the start date? Needs testing before committing.
-
-**Option B — Formula field (no bot change)**
-User adds a formula: `and(not empty(prop("Recurring Series")), prop("Due Date") >= now())` and filters their view by it.
-- Zero bot changes; works today; can be documented in README Usage Guide immediately as interim solution.
-- Less discoverable; requires user setup.
-
-### Decisions made so far
-- Grace period logic (`_get_due_end_or_start`) already handles date ranges correctly — end date is used for overdue comparison. No changes needed there for either option.
-- Formula approach (Option B) can be documented in README now, independent of whichever option is implemented.
-
-### Open questions
-- Does Notion's "today" / "this week" filter match a date range where today falls within the range, or only when start = today? (Test before implementing Option A.)
-- Toggle granularity: per-RTD field or per-database config key?
-
-### Dependencies
-- None. Isolated to `_calc_due_date` in `recurring_tasks.py`.
-
----
 
 ## Feature: Extended Cadence (Every Y Periods)
 

@@ -182,7 +182,9 @@ def auto_due_date_update_count(_client, page: dict, prev_page: dict | None) -> d
     # Treat this as the initial set — do not increment the counter.
     if not first_due and current_due:
         logger.info(f"First due date seen — stamping '{FIRST_DATE_FIELD}': {current_due}")
-        updates[FIRST_DATE_FIELD] = {"date": {"start": current_due}}
+        due_prop = _get_prop(page, DATE_FIELD)
+        due_date_obj = (due_prop or {}).get("date", {})
+        updates[FIRST_DATE_FIELD] = {"date": {k: v for k, v in due_date_obj.items() if k in ("start", "end")}}
         return updates
 
     # Increment only when: page has due-date history, new value is a date, and the DATE changed.

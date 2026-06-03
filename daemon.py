@@ -28,7 +28,7 @@ from bot_notes import clear_bot_notes, flush_bot_notes
 import recurring_tasks
 from recurring_tasks import BOT_CREATED_PAGES_KEY
 
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 NOTION_API_MIN_VERSION = "1.1.0"
 
 parser = argparse.ArgumentParser(description="Notion automation daemon")
