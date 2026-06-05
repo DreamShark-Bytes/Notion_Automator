@@ -158,26 +158,32 @@ journalctl -u notion-daemon -f
 
 1. Download NSSM from [nssm.cc/download](https://nssm.cc/download) — extract and put `nssm.exe` somewhere permanent (e.g. `C:\Tools\nssm.exe`)
 
-2. Open **Command Prompt as Administrator** and run (replace the path with your actual project location):
+2. Open `install-service.ps1` in a text editor and set `$ProjectDir` and `$NssmPath` to match your machine.
 
-```cmd
-C:\Tools\nssm.exe install NotionAutomator "C:\Users\YOUR_USER\Documents\Notion_Automator\venv\Scripts\python.exe" "daemon.py"
-C:\Tools\nssm.exe set NotionAutomator AppDirectory "C:\Users\YOUR_USER\Documents\Notion_Automator"
-C:\Tools\nssm.exe set NotionAutomator DisplayName "Notion Automator"
-C:\Tools\nssm.exe set NotionAutomator Description "Notion automation daemon"
-C:\Tools\nssm.exe set NotionAutomator Start SERVICE_AUTO_START
-C:\Tools\nssm.exe start NotionAutomator
+3. Open **PowerShell as Administrator** and run:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\install-service.ps1
 ```
 
-3. Manage the service:
+4. Manage the service from **PowerShell**:
 
-```cmd
-sc start NotionAutomator
-sc stop NotionAutomator
-sc query NotionAutomator
+```powershell
+Start-Service NotionAutomator
+Stop-Service NotionAutomator
+Get-Service NotionAutomator
+```
+
+To list all NSSM-managed services (useful if you forget the service name):
+
+```powershell
+Get-CimInstance Win32_Service | Where-Object PathName -match 'nssm.exe' | Format-Table Name, DisplayName, State
 ```
 
 Or open **services.msc** and find **Notion Automator** in the list.
+
+> **Note:** Avoid using `sc` in PowerShell — it is aliased to `Set-Content`, not the Service Control Manager. Use `Start-Service` / `Stop-Service` / `Get-Service` instead, or run `sc.exe` (with the `.exe` extension) if you prefer the `sc` syntax.
 
 Logs are written to `notion_daemon.log` in the project directory.
 
@@ -451,7 +457,7 @@ Note: Notion evaluates all branches of `and()`/`or()` — there is no short-circ
 ---
 
 ## Updating
-
+### Linux
 1. Stop the service: `sudo systemctl stop notion-daemon`
 2. Back up any files you've edited: `automations.py` and `config.toml` are the only ones you're expected to modify
 3. Pull the latest changes: `git pull`
@@ -461,6 +467,20 @@ Note: Notion evaluates all branches of `and()`/`or()` — there is no short-circ
 6. Update `config.toml` to match any new config format changes
 7. Start the service: `sudo systemctl start notion-daemon`
 8. Check logs to confirm governance ran cleanly: `journalctl -u notion-daemon -f`
+
+To diff your local `automations.py` against the new version before overwriting: `git diff HEAD automations.py`
+
+### Windows
+
+1. Stop the service: `Stop-Service NotionAutomator`
+2. Back up any files you've edited: `automations.py` and `config.toml` are the only ones you're expected to modify
+3. Pull the latest changes: `git pull`
+4. Install any new dependencies: `venv\Scripts\pip install -r requirements.txt`
+   - This also updates [Notion_API](https://github.com/DreamShark-Bytes/Notion_API) if the pinned version changed. The release notes will call this out explicitly when it applies.
+5. Apply any Notion-side changes listed in the release notes (field renames, new select options, new columns)
+6. Update `config.toml` to match any new config format changes
+7. Start the service: `Start-Service NotionAutomator`
+8. Check logs to confirm governance ran cleanly: open `notion_daemon.log` in the project directory, or tail it in PowerShell: `Get-Content -Path .\notion_daemon.log -Tail 50 -Wait`
 
 To diff your local `automations.py` against the new version before overwriting: `git diff HEAD automations.py`
 

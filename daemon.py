@@ -50,7 +50,7 @@ parser.add_argument(
 parser.add_argument(
     "--reconcile",
     action="store_true",
-    help="Force-write Period Key, Occurrence #, and Period Target on all open recurring tasks, then exit. Use after changing RTD config during testing.",
+    help="Force-write Period Key, Occurrence #, and Period Target on all recurring tasks (including closed and historical), then exit. Use after changing RTD config or to correct historical records.",
 )
 args = parser.parse_args()
 

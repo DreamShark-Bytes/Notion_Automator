@@ -229,6 +229,8 @@ def auto_last_edited_note(_client, page: dict, prev_page: dict | None) -> dict:
 AUTOMATIONS = [
     auto_closed_date,
     auto_due_date_update_count,
+    # auto_recurring_tasks must remain last — it creates Notion pages and should
+    # run after all field-stamping automations have settled their updates.
     auto_recurring_tasks,
     # auto_last_edited_note,   # ← uncomment to enable
 ]

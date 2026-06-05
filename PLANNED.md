@@ -6,21 +6,28 @@ Living design document. Sections are deleted when a feature is implemented and i
 
 ## Contents
 
-- [Due Date Visibility Throughout Period](#due-date-visibility-throughout-period)
-- [Extended Cadence (Every Y Periods)](#feature-extended-cadence-every-y-periods)
-- [Clear Reminders on Close](#feature-clear-reminders-on-close) _(not pursuing)_
+- [Extended Cadence (Every Y Periods)](#feature-extended-cadence-every-y-periods)f
 - [Governance Schema Validation](#improvement-governance-schema-validation)
 - [Schema-Check Safety Net in automations.py](#improvement-schema-check-safety-net-in-automationspy)
 - [RTD Optional Fields — Default Handling](#bug-rtd-optional-fields--default-handling-for-emptyunknown-values)
+- [Minimum N — Carry-Over Instead of Archive](#improvement-minimum-n-per-period--carry-over-instead-of-archive)
+- [Rename "At most N" → "Maximum N"](#migration-rename-at-most-n-per-period--maximum-n-per-period)
 - [Configurable Field Inheritance](#feature-configurable-field-inheritance-for-recurring-tasks)
 - [Icon Inheritance from RTD](#feature-icon-inheritance-from-rtd)
 - [Automation Hub](#automation-hub-formerly-project-page)
 - [Notifications](#notifications)
 - [Clear Blocking/Blocked-By on Close](#clear-blockingblocked-by-on-close)
 - [First Value Field Tracking](#first-value-field-tracking)
+- [Field Update Count (Abstract)](#improvement-field-update-count-abstract)
+- [RTD Display Fields (Current Period)](#improvement-rtd-display-fields-current-period)
 - [Timer / Mission Tracking](#timer--mission-tracking)
 - [Automated Testing](#automated-testing)
 - [Bulk Edit Tool](#bulk-edit-tool-tools)
+- [Current Open Tasks Field](#current-open-tasks-field)
+- [One-click Close Button (RTD Home Page)](#one-click-close-button-rtd-home-page)
+- [Habit Due Dates with Rolling Forward](#habit-due-dates-with-rolling-forward)
+- [Range Cadence (At Least N, At Most M)](#range-cadence-at-least-n-at-most-m)
+- [Task Templates](#task-templates)
 - [Undeveloped Ideas](#undeveloped-ideas)
 
 ---
@@ -39,15 +46,15 @@ Living design document. Sections are deleted when a feature is implemented and i
 
 ### Fields added / changed
 
-| # | Field | Type | Change | Notes |
-|---|---|---|---|---|
-| 1 | Condition | Select | New (replaces Cadence Type) | `Every` / `At least` / `At most` / `Unlimited` |
-| 2 | Cadence | Select | New | `Every Day` / `Every Week` / `Every 2 Weeks` / `Every Month` / `Every Quarter` / `Every Year` / `Custom` |
-| 3 | X (Custom Cadence) | Number | Rename from `N Cadence` | Task count per Y periods. Only read when Cadence=Custom. |
-| 4 | Y (Custom Cadence) | Number | New | Period multiplier. Only read when Cadence=Custom. |
-| 5 | Period (Custom Cadence) | Select | Rename from `Period` | Day / Week / Month / Quarter / Year. Only read when Cadence=Custom. |
-| 6 | Cadence (Display) | Rich Text | New | Bot-written each governance run. Human-readable full cadence string (e.g. "At least 1 every 2 weeks"). Like Period Target on tasks — display only. |
-| 7 | Current Period Start (Custom Cadence) | Date | New | Bot advances on each new period; user can edit to shift window boundaries. Only meaningful when Y > 1. |
+| #   | Field                                 | Type      | Change                      | Notes                                                                                                                                              |
+| -----| ---------------------------------------| -----------| -----------------------------| ----------------------------------------------------------------------------------------------------------------------------------------------------|
+| 1   | Condition                             | Select    | New (replaces Cadence Type) | `Every` / `At least` / `At most` / `Unlimited`                                                                                                     |
+| 2   | Cadence                               | Select    | New                         | `Every Day` / `Every Week` / `Every 2 Weeks` / `Every Month` / `Every Quarter` / `Every Year` / `Custom`                                           |
+| 3   | X (Custom Cadence)                    | Number    | Rename from `N Cadence`     | Task count per Y periods. Only read when Cadence=Custom.                                                                                           |
+| 4   | Y (Custom Cadence)                    | Number    | New                         | Period multiplier. Only read when Cadence=Custom.                                                                                                  |
+| 5   | Period (Custom Cadence)               | Select    | Rename from `Period`        | Day / Week / Month / Quarter / Year. Only read when Cadence=Custom.                                                                                |
+| 6   | Cadence (Display)                     | Rich Text | New                         | Bot-written each governance run. Human-readable full cadence string (e.g. "At least 1 every 2 weeks"). Like Period Target on tasks — display only. |
+| 7   | Current Period Start (Custom Cadence) | Date      | New                         | Bot advances on each new period; user can edit to shift window boundaries. Only meaningful when Y > 1.                                             |
 
 Net-new fields: **3** (Y, Cadence (Display), Current Period Start). Fields 3 and 5 are renames of existing fields.
 
@@ -109,23 +116,6 @@ Requires a migration script in `tools/` before shipping:
 
 ---
 
-## Feature: Clear Reminders on Close
-
-**Status:** Not pursuing — no clean implementation path exists.
-
-### Findings
-- **Clearing the `reminder` field on the date property via API:** does NOT remove the Inbox entry (user-tested). Prevents future reminder fires only.
-- **Clearing the date entirely:** removes the Inbox entry, but destroys the date value. Unacceptable — breaks `auto_closed_date`, `First Due Date`, and analytics data.
-- Notion's built-in automation solution (confirmed on Reddit, r/Notion/comments/16eavlg) is also "clear the date on close" — same destructive approach.
-- No Notion API endpoint exists for dismissing Inbox entries directly. The Inbox is a UI-layer construct.
-- Cross-device behavior is broken regardless: clearing on desktop/web does not clear the iPhone app notification.
-- Workaround: "Archive All" button in the Inbox.
-
-### Why not pursuing
-The only effective mechanism is destructive. The workaround is adequate. Revisit only if Notion exposes an Inbox API.
-
----
-
 ## Improvement: Governance Schema Validation
 
 **Status:** Pre-design
@@ -161,6 +151,8 @@ The only effective mechanism is destructive. The workaround is adequate. Revisit
 
 ### Dependencies
 - Automation Hub for surfacing warnings visibly. Log-only until then.
+
+> **Note:** This is distinct from the Schema-Check Safety Net below. This feature validates schema health proactively at governance time. The Safety Net prevents crashes defensively at write time during every poll. Both are needed.
 
 ---
 
@@ -218,6 +210,42 @@ if task_type not in {"Habit", "Responsibility", "Bad Habit"}:
 ### Dependencies
 - None. Isolated to `recurring_tasks.py`.
 - Hub integration for surfacing warnings requires Automation Hub.
+
+---
+
+## Improvement: Minimum N Per Period — Carry-Over Instead of Archive
+
+**Status:** Ready to implement
+**One-liner:** At period boundary, when Minimum N is already met, carry the remaining open task forward into the new period (resetting field tracking) instead of archiving it.
+
+### Decision
+The archive-on-minimum-met behavior was designed before governance could reset field tracking fields. Now that rolling forward is established as a pattern (see Habit Due Dates), archiving is unnecessary and removes a valid "do more than the minimum" opportunity.
+
+**New behavior:**
+- **Minimum met, period ends** → carry the open task forward: update Due Date to new period, clear First Due Date, reset Due Date Update Count to 0, correct Period Key and Occurrence #. No archiving. Governance sees the carried-over task covering the current period and skips creating a new one.
+- **Minimum NOT met, period ends** → cancel + create replacement. Accountability signal intact. (Unchanged.)
+
+### Implementation
+In `run_recurring_governance`, replace the `archive_page()` call for the "minimum met" stale-task case with carry-over field writes (same pattern as Habit rolling forward).
+
+### Dependencies
+- Habit Due Dates with Rolling Forward (same field-reset pattern — implement together or ensure field-reset logic is shared)
+
+---
+
+## Migration: Rename "At most N per period" → "Maximum N per period"
+
+**Status:** Ready to implement
+**One-liner:** Rename the cadence type select option to match the "Minimum N per period" naming convention.
+
+### Changes required
+1. Rename the Notion select option on the RTD from `"At most N per period"` → `"Maximum N per period"` (manual step in Notion)
+2. Update the backward-compat shim in `recurring_tasks.py` to also normalize `"At most N per period"` → `"Maximum N per period"` (the existing `"N per period"` shim is the pattern to follow)
+3. Update all references in DESIGN.md and README.md
+
+### Notes
+- Backward-compat shim means the rename is non-breaking for existing configs
+- Deploy order: update code first, then rename in Notion (old option still works until renamed)
 
 ---
 
@@ -303,17 +331,17 @@ Hardcoded invariants (`FIELDS_NOT_INHERITED`, `_READONLY_PROP_TYPES`) remain in 
 **Section 1: Task Databases**
 A child database (table view) where each row is a task database the bot monitors.
 
-| Column               | Type      | Notes                                                                                      |
-| ---------------------| ----------| -------------------------------------------------------------------------------------------|
-| Name                 | Title     | Human-readable label                                                                       |
-| Database ID          | Text      | Notion database ID                                                                         |
-| Closed Date          | Checkbox  | Enables closed date stamping                                                               |
-| Reopen Count         | Checkbox  | Enables reopen count tracking                                                              |
-| Update Count Fields  | Text      | Comma-separated fields to count updates for (e.g. "Due Date"). Replaces `due_date_update_count`. |
-| First Value Fields   | Text      | Comma-separated fields to snapshot on first observation (e.g. "Due Date, Closed Date, Status") |
-| Inheritance Mode     | Select    | Inclusive (whitelist) or Exclusive (blacklist). Default: Exclusive (current behavior).     |
-| Inheritance Fields   | Text      | Comma-separated fields for the selected inheritance mode.                                  |
-| Errors & Warnings    | Rich Text | Bot-written; cleared when resolved                                                         |
+| Column              | Type      | Notes                                                                                            |
+| ---------------------| -----------| --------------------------------------------------------------------------------------------------|
+| Name                | Title     | Human-readable label                                                                             |
+| Database ID         | Text      | Notion database ID                                                                               |
+| Closed Date         | Checkbox  | Enables closed date stamping                                                                     |
+| Reopen Count        | Checkbox  | Enables reopen count tracking                                                                    |
+| Update Count Fields | Text      | Comma-separated fields to count updates for (e.g. "Due Date"). Replaces `due_date_update_count`. |
+| First Value Fields  | Text      | Comma-separated fields to snapshot on first observation (e.g. "Due Date, Closed Date, Status")   |
+| Inheritance Mode    | Select    | Inclusive (whitelist) or Exclusive (blacklist). Default: Exclusive (current behavior).           |
+| Inheritance Fields  | Text      | Comma-separated fields for the selected inheritance mode.                                        |
+| Errors & Warnings   | Rich Text | Bot-written; cleared when resolved                                                               |
 
 **Section 2: Recurring Tasks**
 A block (or small sub-page) showing the `[recurring_tasks]` config: definitions DB ID, tasks DB ID, enabled toggle. Errors and warnings from governance written here in an "Errors & Warnings" rich-text sub-field. Bot clears it when the issue resolves; user clears it to acknowledge.
@@ -480,6 +508,48 @@ A checkbox field on the Hub page itself (not per-RTD). On each poll, the daemon 
 
 ---
 
+## Improvement: Field Update Count (Abstract)
+
+**Status:** Pre-design
+**One-liner:** Generalize `auto_due_date_update_count` to track update counts for any configured field(s) — a companion to First Value Field Tracking, kept as a separate feature and separate config key.
+
+### Design
+- New config key per `[[databases]]` entry: `update_count_fields = ["Due Date", "Status"]`
+- For each configured field, bot maintains a `[Field Name] Update Count` number field in the task database
+- Increment logic: same as current `auto_due_date_update_count` — only when the date portion changes (for date fields) or value changes (for other types); not on first set; not on clear
+- `due_date_update_count = true` becomes a deprecated alias for `update_count_fields = ["Due Date"]`; warn and continue
+
+### Why separate from First Value Field Tracking
+These answer different questions. First Value = "what was this when first observed?" (snapshot, one-time write). Update Count = "how many times has this changed?" (running counter). Users may want one without the other — merging forces unnecessary coupling.
+
+### Dependencies
+- First Value Field Tracking (shares config pattern; implement together or after)
+- `_db_configs` registry already in place
+
+---
+
+## Improvement: RTD Display Fields (Current Period)
+
+**Status:** Pre-design
+**One-liner:** Bot-written `Current Period` Date field on the RTD showing the current period's start and end dates — enables Notion formula fields and rollups that filter tasks by current period.
+
+### Design
+- Field: `Current Period` — Date (start + end) on the RTD database
+- Governance writes this field on every governance pass (cron + startup + RTD activation)
+- Value: period start datetime → period end datetime for the current period
+- User may edit to shift boundaries (same pattern as Extended Cadence's `Current Period Start`)
+
+### Why needed
+Notion formulas on task pages cannot compute period boundaries without a reference point. A formula using `.map(current.prop("Current Period"))` on the RTD relation can check whether a task's Due Date or Closed Date falls within the period — enabling "tasks this period" filters and rollups without bot involvement in per-task field writes.
+
+### Note on Tasks Done This Period
+The `Tasks Done This Period` Number field (previously planned as a bot-maintained counter on the RTD) is dropped in favour of this approach. A Notion rollup counting tasks where the period formula is satisfied is more accurate and requires no bot maintenance.
+
+### Dependencies
+- None — independent of `Current Open Tasks`
+
+---
+
 ## Timer / Mission Tracking
 
 **Status:** Pre-design (early — major open questions remain)
@@ -548,9 +618,140 @@ Power BI is read-only — no write-back possible. When analysis reveals data tha
 
 ---
 
+## Current Open Tasks Field
+
+**Status:** Pre-design
+**One-liner:** Bot-written Relation field on the RTD that tracks all currently open tasks for the series — exposes in-memory tracking as a visible Notion property.
+
+### Motivation
+The bot already tracks open tasks per RTD in memory (`open_tasks_by_def`). Exposing this as a Notion Relation field lets the user see exactly which tasks the bot considers active, making bot state visible and debuggable. Also a prerequisite for one-click close and deletion detection.
+
+### Design
+- Field type: Relation (multi) → task database
+- Bot writes this field on every governance pass: adds newly created tasks, removes tasks that entered the Complete group or were cancelled
+- All currently open tasks for the series are included (across periods — the user may have pre-created future-period tasks)
+- User should not edit — content is overwritten by governance
+
+### Required implementation behaviors
+All of the following must be implemented for this feature to be complete:
+
+1. **Write on task creation** — add newly created task to the relation
+2. **Clear on completion/cancellation** — remove task when it enters Complete group or is cancelled
+3. **Full refresh on RTD activation** — rebuild the relation from scratch when RTD transitions to Active
+4. **Q1-C promotion logic** — when a user-created future-period task becomes the current period's task, archive the bot-created task and update `Current Open Tasks` to point to the user's task (only if cadence limit is met)
+5. **Deletion detection** — when governance runs, fetch each task in `Current Open Tasks` directly via `GET /v1/pages/{id}`; treat 404 or `archived: true` as deletion; create replacement task with On Hold status and note
+6. **Recovery guard** — if a previously archived task is recovered from trash, it will appear as an open task alongside the replacement; do not auto-re-archive it; let governance drift-correct both tasks' fields and let them coexist
+
+### Governance interaction
+Governance writes this field when:
+- A new task is created (add to relation)
+- A task enters the Complete group (remove from relation)
+- A task is cancelled (remove from relation)
+- RTD transitions to Active (full refresh)
+- Period changes, `week_start`, or `day_start_hour` changes trigger governance via RTD activation
+
+### Blocks
+- One-click Close Button (requires this field as a Notion Button target)
+- Deletion detection (requires this field to check if the bot-tracked task still exists)
+
+### Dependencies
+- `notion_api.py` must support writing Relation properties
+- Governance must be updated to maintain this field on all relevant transitions
+
+---
+
+## One-click Close Button (RTD Home Page)
+
+**Status:** Pre-design
+**One-liner:** A Notion Button field on the RTD (or a home page linking to RTDs) that closes the current period's open task with one tap — triggers normal next-task creation automatically.
+
+### Motivation
+Habits especially benefit from minimal friction. Currently closing a task requires opening it, changing the status, and waiting for the bot to create the next one. A button on the RTD row reduces this to one tap.
+
+### Design
+- Notion Button field on the RTD: "Complete Current Task"
+- Button action: "Edit pages in relation" → targets `Current Open Tasks` field → sets Status to Done (or equivalent Complete-group status)
+- Bot detects the status change on next poll → stamps Closed Date → creates next task normally
+- If multiple open tasks: button targets only the task in the current period (not future-period pre-created tasks). Design TBD — may require filtering in the button action or accepting that all open tasks are closed.
+- Applies to all task types (Habit, Responsibility, Bad Habit) — not Habit-only
+
+### Dependencies
+- `Current Open Tasks` field must be implemented first
+- Notion Buttons must support "filter by period" or user accepts all-open behavior
+
+---
+
+## Habit Due Dates with Rolling Forward
+
+**Status:** Pre-design
+**One-liner:** Give Habit tasks a Due Date, but instead of cancelling on expiry, roll the Due Date forward to the next period — closer to Responsibility behavior without the punitive cancel.
+
+### Motivation
+Currently Habits get no Due Date, so they never appear in Notion "today"/"this week" calendar views and there's no visible sense of which period a Habit belongs to. Rolling forward — rather than cancelling — preserves the "try again, never fail" spirit of a Habit while giving it calendar visibility throughout the period. This replaces what was previously tracked as "Due Date Visibility Throughout Period."
+
+### Decided
+- Governance rolls Due Date forward to the new period at the period boundary — does not cancel or archive the task
+- Due Date spans the full period (range: period start → period end), matching Responsibility format
+- If `Due Date Update Count` field exists: governance explicitly resets it to 0 AND clears `First Due Date` (null). On next poll, `auto_due_date_update_count` sees `First Due Date` empty → stamps it with the new period Due Date → returns early without incrementing. No -1 trick needed.
+- Occurrence # resets to 1 on rollover (rolled-forward task is the first instance of the new period)
+
+### Open questions
+- If `Current Open Tasks` field exists: should governance update it when rolling forward (task stays open, same task, Due Date changes)?
+
+### Dependencies
+- `Current Open Tasks` field (for the open question above — not a blocker for the core rollover logic)
+
+---
+
+## Range Cadence (At Least N, At Most M)
+
+**Status:** Pre-design
+**One-liner:** A new Cadence Type that enforces both a minimum and a maximum per period — e.g. "at least 2 gym sessions, at most 5."
+
+### Motivation
+Current cadences are one-sided: Minimum N (open-ended upper bound) or Exactly N (hard cap). A range cadence gives users a target window rather than a single number.
+
+### Open questions
+- Field representation: two separate number fields (`N Cadence` and `M Cadence`), or a single text field ("2-5"), or two new RTD columns?
+- Governance behavior when count is between N and M: no action (in range), create more if below N, stop creating if at M.
+- What happens at M? Same as "Exactly N" — route next task to next period. Or flag the RTD and let the user decide?
+- How does this interact with Extended Cadence (every Y periods)?
+
+### Dependencies
+- Resolve DESIGN.md discrepancy #9 (At most N behavior) first — the current implementation hard-routes to next period rather than soft-capping. Range cadence needs that resolved to know which model to build on.
+- Extended Cadence design should be reviewed for overlap before committing to new fields.
+
+---
+
+## Task Templates
+
+**Status:** Pre-design
+**One-liner:** Apply a Notion template to bot-created recurring tasks so they include user-configured buttons and content (e.g. "Create child task", "Create blocker task").
+
+### Background
+Notion's API supports templates via `GET /v1/data_sources/{db_id}/templates` (list) and `POST /v1/pages` with `template: {type: "template_id", template_id: "..."}` (create). Template content is applied asynchronously — the page is returned immediately but blank; Notion fills in content in the background.
+
+### Design
+- Config: optional `template_id` (or `template_name`) per `[[databases]]` entry in `config.toml`
+- At startup: bot resolves template name → ID (via list endpoint) if name configured
+- On task creation: pass `template` param to `create_page()`; omit `children` (not allowed when using templates)
+- Template must be in the same workspace and accessible to the integration token
+
+### Open questions
+- Should template be per-RTD or per-database? Per-database is simpler; per-RTD allows different templates for different series.
+- `notion_api.py` needs a `list_templates(database_id)` method — design alongside the feature.
+- Async gap: page exists but is blank for a moment. Does the bot's next poll see incomplete content? Probably not an issue since the bot only reads/writes properties, not page content.
+
+### Dependencies
+- `notion_api.py`: add `list_templates()` and update `create_page()` to accept an optional `template_id` param
+
+---
+
 ## Undeveloped Ideas
 
 Ideas raised but not designed. No open questions analyzed — revisit when the relevant feature area is active.
+
+- **Lookahead (Future Task Pre-creation)** — Auto-create tasks for N future periods so they appear on the calendar in advance. Deferred: the manual workaround (create a task with a future Due Date → bot initializes it) already serves the need and is more precise. Revisit if manual creation becomes burdensome at scale.
 
 - **Specific Days (Recurring Tasks, multi-day per week)** — One RTD creates tasks on specific weekdays (e.g., Tuesday AND Thursday club meetings). Currently handled by two RTDs (one per day), which is clean and keeps tracking streams separate. Implementing this would require governance to create N tasks per week, one per selected day — a significant change to the governance loop. Two-RTD workaround is the current recommendation.
 

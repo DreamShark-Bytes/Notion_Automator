@@ -1377,7 +1377,8 @@ def auto_recurring_tasks(client: "NotionClient", page: dict, prev_page: dict | N
             # Derive Period Key from the task's Due Date when available, so a manually
             # created task with a past Due Date lands in the correct period rather than
             # the current one. Fall back to now when Due Date is absent.
-            pk_dt = _get_due_end_or_start(page) or now
+            existing_due_dt = _get_due_end_or_start(page)
+            pk_dt = existing_due_dt or now
             current_pk = _period_key(period, pk_dt) if period else None
 
             task_type = _get_select(definition, "Type")
@@ -1390,7 +1391,7 @@ def auto_recurring_tasks(client: "NotionClient", page: dict, prev_page: dict | N
             if period_target:
                 updates["Period Target (Recurring Task)"] = {"rich_text": [{"type": "text", "text": {"content": period_target}}]}
 
-            if not existing_due:
+            if not existing_due_dt:
                 due_date = _calc_due_date(cadence_type, period, anchor_day, anchor_time, use_next_period=False, task_type=task_type, def_id=definition["id"], cadence_n=cadence_n)
                 if due_date:
                     updates["Due Date"] = due_date
