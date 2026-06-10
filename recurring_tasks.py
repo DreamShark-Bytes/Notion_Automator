@@ -441,7 +441,11 @@ def _calc_due_date(
             # Rule 5: specific anchor day + specific time → single point-in-time
             try:
                 h, m = _parse_anchor_time(anchor_time)
-                return {"date": {"start": target.replace(hour=h, minute=m, second=0, microsecond=0).isoformat(), "end": None}}
+                due_dt = target.replace(hour=h, minute=m, second=0, microsecond=0)
+                if not use_next_period and due_dt < now and now.date() == adjusted_now.date():
+                    target, _ = _period_dates(period, anchor_day, True, adjusted_now)
+                    due_dt = target.replace(hour=h, minute=m, second=0, microsecond=0)
+                return {"date": {"start": due_dt.isoformat(), "end": None}}
             except Exception:
                 logger.warning(f"Could not parse anchor_time '{anchor_time}' — falling back to single-day range.")
                 if def_id:
@@ -456,7 +460,10 @@ def _calc_due_date(
             # Rule 3: Period=Day + anchor time → point-in-time on the logical day (no end)
             try:
                 h, m = _parse_anchor_time(anchor_time)
-                return {"date": {"start": target.replace(hour=h, minute=m, second=0, microsecond=0).isoformat(), "end": None}}
+                due_dt = target.replace(hour=h, minute=m, second=0, microsecond=0)
+                if not use_next_period and due_dt < now and now.date() == adjusted_now.date():
+                    due_dt += timedelta(days=1)
+                return {"date": {"start": due_dt.isoformat(), "end": None}}
             except Exception:
                 logger.warning(f"Could not parse anchor_time '{anchor_time}' — falling back to full-day range.")
                 if def_id:
@@ -470,6 +477,9 @@ def _calc_due_date(
             try:
                 h, m = _parse_anchor_time(anchor_time)
                 dt = period_end_date.replace(hour=h, minute=m, second=0, microsecond=0)
+                if not use_next_period and dt < now and now.date() == adjusted_now.date():
+                    next_next_target, _ = _period_dates(period, None, True, next_target)
+                    dt = (next_next_target - timedelta(days=1)).replace(hour=h, minute=m, second=0, microsecond=0)
                 return {"date": {"start": dt.isoformat(), "end": None}}
             except Exception:
                 logger.warning(f"Could not parse anchor_time '{anchor_time}' — falling back to full period range.")

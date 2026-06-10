@@ -114,8 +114,8 @@ class TestCalcDueDateDay:
         assert start.date() == datetime(2026, 6, 3).date()
 
     def test_day_anchor_time_no_end(self):
-        # AnchorTime=09:00 → point-in-time, no end
-        now = local_dt(2026, 6, 3, 10, 0)
+        # AnchorTime=09:00, activated before the anchor time → point-in-time today, no end
+        now = local_dt(2026, 6, 3, 8, 0)
         result = calc("Once per period", "Day", None, "09:00", False, "Responsibility", now)
         start, end = parse_notion_date(result)
         assert end is None, "AnchorTime should produce a single datetime, not a range"
@@ -131,6 +131,34 @@ class TestCalcDueDateDay:
         assert start.date() == datetime(2026, 6, 2).date(), \
             f"Expected June 2, got {start.date()}"
         assert start.hour == 9
+
+    def test_day_anchor_time_past_advances_to_tomorrow(self):
+        # Rule 3 bug fix: activated at 4pm with 08:00 anchor → should land tomorrow, not today in the past
+        now = local_dt(2026, 6, 10, 16, 0)
+        result = calc("Once per period", "Day", None, "08:00", False, "Responsibility", now)
+        start, end = parse_notion_date(result)
+        assert end is None
+        assert start.date() == datetime(2026, 6, 11).date(), \
+            f"Expected June 11 (tomorrow), got {start.date()}"
+        assert start.hour == 8 and start.minute == 0
+
+    def test_day_anchor_time_not_yet_past_stays_today(self):
+        # Anchor time hasn't passed yet — stays on today
+        now = local_dt(2026, 6, 10, 7, 0)
+        result = calc("Once per period", "Day", None, "08:00", False, "Responsibility", now)
+        start, end = parse_notion_date(result)
+        assert end is None
+        assert start.date() == datetime(2026, 6, 10).date()
+        assert start.hour == 8 and start.minute == 0
+
+    def test_day_anchor_time_past_use_next_period_unaffected(self):
+        # use_next_period=True already targets tomorrow — past check must not double-advance
+        now = local_dt(2026, 6, 10, 16, 0)
+        result = calc("Once per period", "Day", None, "08:00", True, "Responsibility", now)
+        start, end = parse_notion_date(result)
+        assert end is None
+        assert start.date() == datetime(2026, 6, 11).date()
+        assert start.hour == 8 and start.minute == 0
 
     def test_day_use_next_period(self):
         now = local_dt(2026, 6, 3, 10, 0)  # June 3 → next = June 4
@@ -192,6 +220,25 @@ class TestCalcDueDateWeek:
         assert start.date() == datetime(2026, 6, 5).date()
         assert start.hour == 9 and start.minute == 0
 
+    def test_week_anchor_day_and_anchor_time_past_advances_to_next_week(self):
+        # Rule 5 bug fix: anchor_day=Friday, anchor_time=09:00, but it's Friday afternoon
+        now = local_dt(2026, 6, 5, 14, 0)  # Friday June 5 at 2pm
+        result = calc("Once per period", "Week", 5, "09:00", False, "Responsibility", now)
+        start, end = parse_notion_date(result)
+        assert end is None
+        assert start.date() == datetime(2026, 6, 12).date(), \
+            f"Expected next Friday June 12, got {start.date()}"
+        assert start.hour == 9 and start.minute == 0
+
+    def test_week_anchor_day_and_anchor_time_not_yet_past_stays_this_week(self):
+        # Anchor day = Friday, anchor time not yet passed — stays this week
+        now = local_dt(2026, 6, 5, 7, 0)  # Friday June 5 at 7am, before 9am
+        result = calc("Once per period", "Week", 5, "09:00", False, "Responsibility", now)
+        start, end = parse_notion_date(result)
+        assert end is None
+        assert start.date() == datetime(2026, 6, 5).date()
+        assert start.hour == 9 and start.minute == 0
+
     def test_week_use_next_period(self):
         now = local_dt(2026, 6, 3, 10, 0)  # week of June 1 → next = June 8
         result = calc("Once per period", "Week", None, None, True, "Responsibility", now)
@@ -247,6 +294,16 @@ class TestCalcDueDateMonth:
         start, end = parse_notion_date(result)
         assert end is None
         assert start.date() == datetime(2026, 6, 20).date()
+        assert start.hour == 14 and start.minute == 0
+
+    def test_month_anchor_day_and_anchor_time_past_advances_to_next_month(self):
+        # Rule 5 bug fix: anchor_day=20, anchor_time=14:00, but it's the 20th at 4pm
+        now = local_dt(2026, 6, 20, 16, 0)
+        result = calc("Once per period", "Month", 20, "14:00", False, "Responsibility", now)
+        start, end = parse_notion_date(result)
+        assert end is None
+        assert start.date() == datetime(2026, 7, 20).date(), \
+            f"Expected July 20, got {start.date()}"
         assert start.hour == 14 and start.minute == 0
 
     def test_month_december_wraps_to_january(self):
