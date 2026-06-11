@@ -9,11 +9,8 @@ Living design document. Sections are deleted when a feature is implemented and i
 - [Extended Cadence (Every Y Periods)](#feature-extended-cadence-every-y-periods)f
 - [Governance Schema Validation](#improvement-governance-schema-validation)
 - [Schema-Check Safety Net in automations.py](#improvement-schema-check-safety-net-in-automationspy)
-- [RTD Optional Fields — Default Handling](#bug-rtd-optional-fields--default-handling-for-emptyunknown-values)
 - [Minimum N — Carry-Over Instead of Archive](#improvement-minimum-n-per-period--carry-over-instead-of-archive)
-- [Rename "At most N" → "Maximum N"](#migration-rename-at-most-n-per-period--maximum-n-per-period)
 - [Configurable Field Inheritance](#feature-configurable-field-inheritance-for-recurring-tasks)
-- [Icon Inheritance from RTD](#feature-icon-inheritance-from-rtd)
 - [Automation Hub](#automation-hub-formerly-project-page)
 - [Notifications](#notifications)
 - [Clear Blocking/Blocked-By on Close](#clear-blockingblocked-by-on-close)
@@ -46,15 +43,15 @@ Living design document. Sections are deleted when a feature is implemented and i
 
 ### Fields added / changed
 
-| #   | Field                                 | Type      | Change                      | Notes                                                                                                                                              |
-| -----| ---------------------------------------| -----------| -----------------------------| ----------------------------------------------------------------------------------------------------------------------------------------------------|
-| 1   | Condition                             | Select    | New (replaces Cadence Type) | `Every` / `At least` / `At most` / `Unlimited`                                                                                                     |
-| 2   | Cadence                               | Select    | New                         | `Every Day` / `Every Week` / `Every 2 Weeks` / `Every Month` / `Every Quarter` / `Every Year` / `Custom`                                           |
-| 3   | X (Custom Cadence)                    | Number    | Rename from `N Cadence`     | Task count per Y periods. Only read when Cadence=Custom.                                                                                           |
-| 4   | Y (Custom Cadence)                    | Number    | New                         | Period multiplier. Only read when Cadence=Custom.                                                                                                  |
-| 5   | Period (Custom Cadence)               | Select    | Rename from `Period`        | Day / Week / Month / Quarter / Year. Only read when Cadence=Custom.                                                                                |
-| 6   | Cadence (Display)                     | Rich Text | New                         | Bot-written each governance run. Human-readable full cadence string (e.g. "At least 1 every 2 weeks"). Like Period Target on tasks — display only. |
-| 7   | Current Period Start (Custom Cadence) | Date      | New                         | Bot advances on each new period; user can edit to shift window boundaries. Only meaningful when Y > 1.                                             |
+| #   | Field                                 | Type      | Change                      | Notes                                                                                                                                             |
+| -----| ---------------------------------------| -----------| -----------------------------| ---------------------------------------------------------------------------------------------------------------------------------------------------|
+| 1   | Condition                             | Select    | New (replaces Cadence Type) | `Every` / `Minimum` / `Maximum` / `Unlimited`                                                                                                     |
+| 2   | Cadence                               | Select    | New                         | `Every Day` / `Every Week` / `Every 2 Weeks` / `Every Month` / `Every Quarter` / `Every Year` / `Custom`                                          |
+| 3   | X (Custom Cadence)                    | Number    | Rename from `N Cadence`     | Task count per Y periods. Only read when Cadence=Custom.                                                                                          |
+| 4   | Y (Custom Cadence)                    | Number    | New                         | Period multiplier. Only read when Cadence=Custom.                                                                                                 |
+| 5   | Period (Custom Cadence)               | Select    | Rename from `Period`        | Day / Week / Month / Quarter / Year. Only read when Cadence=Custom.                                                                               |
+| 6   | Cadence (Display)                     | Rich Text | New                         | Bot-written each governance run. Human-readable full cadence string (e.g. "Minimum 1 every 2 weeks"). Like Period Target on tasks — display only. |
+| 7   | Current Period Start (Custom Cadence) | Date      | New                         | Bot advances on each new period; user can edit to shift window boundaries. Only meaningful when Y > 1.                                            |
 
 Net-new fields: **3** (Y, Cadence (Display), Current Period Start). Fields 3 and 5 are renames of existing fields.
 
@@ -63,22 +60,22 @@ Net-new fields: **3** (Y, Cadence (Display), Current Period Start). Fields 3 and
 - **Condition=Unlimited**: no cap, no minimum — create a task whenever the prior completes. Bot ignores X, Y, Cadence. Use case: log bad habit occurrences without a period cap. If used with a non-Bad-Habit RTD, log a warning and treat as Every.
 - **Cadence=simple option** (not Custom): X implicitly = 1, Y implicitly = 1, Period derived from the selected option. Custom fields (X, Y, Period) are ignored.
 - **Cadence=Custom**: reads X, Y, Period (Custom Cadence) fields.
-- **Condition applies to both simple and Custom cadences.** "At least 1 every 2 weeks" = Condition: At least + Cadence: Custom, X=1, Y=2, Period=Week.
+- **Condition applies to both simple and Custom cadences.** "Minimum 1 every 2 weeks" = Condition: Minimum + Cadence: Custom, X=1, Y=2, Period=Week.
 - **Quarter** added as a first-class Period option alongside Day, Week, Month, Year.
 
 ### Default values and validation
 
-| Field | Invalid / Missing | Action |
-|---|---|---|
-| Condition | Empty or unknown value | Default to `Every`; log WARNING; surface to Hub |
-| Cadence | Empty or unknown value | Log ERROR, skip RTD this governance run; surface to Hub |
-| X (Custom Cadence) | Empty when Cadence=Custom | Default to 1; log WARNING |
-| X (Custom Cadence) | ≤ 0 | Default to 1; log WARNING |
-| Y (Custom Cadence) | Empty when Cadence=Custom | Default to 1; log WARNING |
-| Y (Custom Cadence) | ≤ 0 | Default to 1; log WARNING |
+| Field                   | Invalid / Missing         | Action                                                  |
+| -------------------------| ---------------------------| ---------------------------------------------------------|
+| Condition               | Empty or unknown value    | Default to `Every`; log WARNING; surface to Hub         |
+| Cadence                 | Empty or unknown value    | Log ERROR, skip RTD this governance run; surface to Hub |
+| X (Custom Cadence)      | Empty when Cadence=Custom | Default to 1; log WARNING                               |
+| X (Custom Cadence)      | ≤ 0                       | Default to 1; log WARNING                               |
+| Y (Custom Cadence)      | Empty when Cadence=Custom | Default to 1; log WARNING                               |
+| Y (Custom Cadence)      | ≤ 0                       | Default to 1; log WARNING                               |
 | Period (Custom Cadence) | Empty when Cadence=Custom | Log ERROR, skip RTD this governance run; surface to Hub |
-| Current Period Start | Future date | Log ERROR, skip RTD this governance run; surface to Hub |
-| Current Period Start | Empty on first activation | Bot writes today as the initial anchor |
+| Current Period Start    | Future date               | Log ERROR, skip RTD this governance run; surface to Hub |
+| Current Period Start    | Empty on first activation | Bot writes today as the initial anchor                  |
 
 Default-value behavior follows the same pattern as existing RTD field defaults (Grace Period, Anchor Day, etc.) — warn and continue where possible; skip and surface where the field is required for correct behavior.
 
@@ -180,39 +177,6 @@ Currently, if a config flag is `true` but the field is missing from Notion, the 
 
 ---
 
-## Bug: RTD Optional Fields — Default Handling for Empty/Unknown Values
-
-**Status:** Ready to implement (partial — Type default is the remaining gap)
-**One-liner:** When an RTD has empty or unknown values for optional fields, governance should use sensible defaults rather than erroring or producing wrong results.
-
-### Current state (what's already handled)
-- **Anchor Day empty** → end-of-period anchor (already implemented)
-- **Anchor Time empty** → no specific time (already implemented)
-- **Grace Period empty / None** → treat as 0 / cancel on due date (fixed in Z8)
-
-### Remaining gap
-- **Type empty or unknown string** → treat as `"Habit"`. Currently, an unrecognized Type may cause unexpected governance behavior or a silent wrong-path execution. The fix: when reading Type from the RTD, if the value is empty, None, or not one of the known types (`"Habit"`, `"Responsibility"`, `"Bad Habit"`), default to `"Habit"` and log a warning.
-
-### Note on scope
-These fields are on the **RTD database only** — not on Task pages. No Task fields are added or changed by this fix. Users who want to surface these values on tasks can use a Notion rollup or linked-page view.
-
-### Implementation
-In `recurring_tasks.py`, when reading Type from an RTD page, add a guard:
-```python
-task_type = get_select(page, "Type") or "Habit"
-if task_type not in {"Habit", "Responsibility", "Bad Habit"}:
-    logger.warning(f"RTD '{title}' has unknown Type '{task_type}' — defaulting to 'Habit'.")
-    task_type = "Habit"
-```
-
-**Hub integration:** the "unknown Type → defaulting to Habit" warning should surface in Hub Section 2 (Recurring Tasks) alongside the existing Anchor Day N>1 and "At most N wrong type" entries. Section 2 needs an "Errors & Warnings" sub-field for RTD-level warnings.
-
-### Dependencies
-- None. Isolated to `recurring_tasks.py`.
-- Hub integration for surfacing warnings requires Automation Hub.
-
----
-
 ## Improvement: Minimum N Per Period — Carry-Over Instead of Archive
 
 **Status:** Ready to implement
@@ -230,22 +194,6 @@ In `run_recurring_governance`, replace the `archive_page()` call for the "minimu
 
 ### Dependencies
 - Habit Due Dates with Rolling Forward (same field-reset pattern — implement together or ensure field-reset logic is shared)
-
----
-
-## Migration: Rename "At most N per period" → "Maximum N per period"
-
-**Status:** Ready to implement
-**One-liner:** Rename the cadence type select option to match the "Minimum N per period" naming convention.
-
-### Changes required
-1. Rename the Notion select option on the RTD from `"At most N per period"` → `"Maximum N per period"` (manual step in Notion)
-2. Update the backward-compat shim in `recurring_tasks.py` to also normalize `"At most N per period"` → `"Maximum N per period"` (the existing `"N per period"` shim is the pattern to follow)
-3. Update all references in DESIGN.md and README.md
-
-### Notes
-- Backward-compat shim means the rename is non-breaking for existing configs
-- Deploy order: update code first, then rename in Notion (old option still works until renamed)
 
 ---
 
@@ -288,26 +236,6 @@ Hardcoded invariants (`FIELDS_NOT_INHERITED`, `_READONLY_PROP_TYPES`) remain in 
 
 ---
 
-## Feature: Icon Inheritance from RTD
-
-**Status:** Ready to implement
-**One-liner:** When the bot creates a recurring task, copy the RTD's icon (emoji or external image) to the new task so task instances carry consistent series branding automatically.
-
-### Decisions made
-- Source is always the RTD icon — same logic as Name. Users who want a one-off icon change can edit the task instance; it does not carry forward.
-- `file` type icons (Notion-hosted uploads) are skipped — the hosted URL may not be reliably writable via the API. Only `emoji` and `external` types are copied.
-- If the RTD has no icon set, the task is created without one (no change to current behavior).
-
-### Implementation
-1. Read `definition.get("icon")` from the RTD page object after fetching it.
-2. If icon is not `None` and type is not `"file"`: pass it to `create_page`.
-3. Add optional `icon` parameter to `create_page` in `notion_api.py`; include `"icon": icon` in the POST body when provided.
-4. Notion_API patch version bump required.
-
-### Dependencies
-- Minor update to `create_page` in `Notion_API` (add `icon` param to POST body).
-
----
 
 ## Automation Hub (formerly "Project Page")
 
@@ -324,7 +252,7 @@ Hardcoded invariants (`FIELDS_NOT_INHERITED`, `_READONLY_PROP_TYPES`) remain in 
 - **Single hub for all automations** — not a page-per-database. All task database configs and recurring task config live here together, mirroring the structure of `config.toml`.
 - **Optional — graceful degradation:** if `hub_page_id` is absent from `config.toml`, all Hub features degrade gracefully: errors and warnings are log-only, no Hub writes occur. Every Hub-writing code path must check Hub availability before writing. This allows the daemon to run without a Hub configured.
 - **Field name parsing (all text-list fields):** Hub text fields that accept field name lists (First Value Fields, Update Count Fields, Inheritance Fields) are parsed as CSV with: strip leading/trailing whitespace per token, case-insensitive match against the database schema, support double-quoted names for fields whose names contain commas.
-- **Recurring Series type validation warning (Section 2):** if an RTD's cadence type is incompatible with its Task Type (e.g., "At most N per period" with Task Type ≠ "Bad Habit"), surface the warning in Hub Section 2 "Errors & Warnings". This extends the existing Anchor Day N>1 and "At most N wrong type" warning entries already planned for Section 2.
+- **Recurring Series type validation warning (Section 2):** if an RTD's cadence type is incompatible with its Task Type (e.g., "Maximum N per period" with Task Type ≠ "Bad Habit"), surface the warning in Hub Section 2 "Errors & Warnings". This extends the existing Anchor Day N>1 and "Maximum N wrong type" warning entries already planned for Section 2.
 
 ### Layout concept (mirrors config.toml structure)
 
@@ -348,7 +276,7 @@ A block (or small sub-page) showing the `[recurring_tasks]` config: definitions 
 
 Warnings to surface here (currently only logged):
 - **Anchor Day ignored (N>1):** RTD uses "Exactly N per period" or "Minimum N per period" with N>1 and an Anchor Day set — Anchor Day is suppressed. User should clear Anchor Day or set N=1.
-- **"At most N per period" with wrong Task Type:** RTD uses this cadence with a type other than Bad Habit — no due date will be set. User should change Task Type to Bad Habit or change cadence.
+- **"Maximum N per period" with wrong Task Type:** RTD uses this cadence with a type other than Bad Habit — no due date will be set. User should change Task Type to Bad Habit or change cadence.
 - **Unknown Task Type:** RTD Type field is empty or unrecognized — defaulting to Habit. User should set a valid Type: Habit, Responsibility, or Bad Habit.
 
 **Section 3: Bot Health**
@@ -369,11 +297,11 @@ All non-formula/non-rollup fields: Type (select, pre-populated options), Cadence
 **RTD field descriptions (to include in create_database call):**
 | Field        | Description                                                                                                                                                                     |
 | --------------| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Type         | Governs task behavior. Habit = repeats whether done or not; Responsibility = repeats only when completed; Bad Habit = tracks things to limit (use with "At most N per period"). |
-| Cadence Type | How tasks recur per period. "Exactly N" = strict count; "Minimum N" = at least N, more welcome; "At most N" = cap, Bad Habit only.                                              |
+| Type         | Governs task behavior. Habit = repeats whether done or not; Responsibility = repeats only when completed; Bad Habit = tracks things to limit (use with "Maximum N per period"). |
+| Cadence Type | How tasks recur per period. "Exactly N" = strict count; "Minimum N" = at least N, more welcome; "Maximum N" = at most N, Bad Habit only.                                        |
 | Period       | The recurring cycle length (Daily, Weekly, Monthly, etc.).                                                                                                                      |
 | N Cadence    | Tasks to create per period. Leave blank for 1.                                                                                                                                  |
-| Anchor Day   | Day to anchor the due date (1=Mon … 7=Sun for weekly; day of month for monthly). Leave blank for end-of-period.                                                                 |
+| Anchor Day   | Day to anchor the due date (1=Mon … 7=Sun for weekly; day of month for monthly). Leave blank for full period range.                                                             |
 | Anchor Time  | Due time in HH:MM (24-hour). Leave blank for no specific time.                                                                                                                  |
 | Grace Period | Days after due date before the bot cancels an incomplete task. Leave blank to cancel on the due date.                                                                           |
 | Status       | Set to Active to enable governance for this definition.                                                                                                                         |
@@ -703,7 +631,7 @@ Currently Habits get no Due Date, so they never appear in Notion "today"/"this w
 
 ---
 
-## Range Cadence (At Least N, At Most M)
+## Range Cadence (Minimum N, Maximum M)
 
 **Status:** Pre-design
 **One-liner:** A new Cadence Type that enforces both a minimum and a maximum per period — e.g. "at least 2 gym sessions, at most 5."
@@ -718,7 +646,7 @@ Current cadences are one-sided: Minimum N (open-ended upper bound) or Exactly N 
 - How does this interact with Extended Cadence (every Y periods)?
 
 ### Dependencies
-- Resolve DESIGN.md discrepancy #9 (At most N behavior) first — the current implementation hard-routes to next period rather than soft-capping. Range cadence needs that resolved to know which model to build on.
+- Resolve DESIGN.md discrepancy #9 (Maximum N behavior) first — the current implementation hard-routes to next period rather than soft-capping. Range cadence needs that resolved to know which model to build on.
 - Extended Cadence design should be reviewed for overlap before committing to new fields.
 
 ---

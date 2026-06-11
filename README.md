@@ -271,7 +271,7 @@ Create a new database in Notion with these fields:
 | Name                | Title     |                                                                                                        |
 | Type                | Select    | `Habit`, `Bad Habit`, `Responsibility`                                                                 |
 | Status              | Status    | Bot only creates tasks when Status = `Active`                                                          |
-| Cadence Type        | Select    | `Once per period`, `Exactly N per period`, `At most N per period`, `Minimum N per period`, `Unlimited` |
+| Cadence Type        | Select    | `Once per period`, `Exactly N per period`, `Maximum N per period`, `Minimum N per period`, `Unlimited` |
 | N Cadence           | Number    | Used by cadence types that reference N; blank for others                                               |
 | Period              | Select    | `Day`, `Week`, `Month`, `Year`                                                                         |
 | Anchor Day          | Number    | Mon=1 … Sun=7 for weekly; 1–31 for monthly (overflows to last day of month)                            |
@@ -319,7 +319,7 @@ tasks_db_id       = "your-tasks-database-id"
 ### How it works
 
 - **One open task per series at all times.** When a task is marked Done or Cancelled, the bot creates the next one automatically.
-- **Due dates** are calculated from Anchor Day and Anchor Time. Without an anchor, the due date is set to the end of the period (e.g. April 30 for a monthly task).
+- **Due dates** are calculated from Anchor Day and Anchor Time. Without an anchor, the due date is a range spanning the full period (e.g. April 1–30 for a monthly task).
 - **Occurrence #** counts completions within the current period. Resets to 1 at the start of each new period for `Once per period` and `Exactly N per period`; continues incrementing for `Minimum N per period` and `Unlimited`.
 - **Grace period** (Responsibilities only): if a task is still open more than N days past its due date, the bot cancels it and creates the next one.
 - **Startup governance**: on every daemon start, the bot checks that each Active series has exactly one open task for the current period. Zero → creates one. Multiple → logs a warning for manual resolution.
@@ -382,7 +382,7 @@ By default, the daemon treats 3am as the start of a new day. Any task completed 
 If all N repetitions of an activity happen at the same scheduled event (e.g. a weekly meeting, a class, a practice), `Minimum N per period` is probably not the right cadence. Use `Once per period` with Anchor Day set to that event's day instead. Completing the task means you showed up; how many times you did something *during* the event is detail that belongs in the task name or notes, not in N. `Minimum N per period` is better suited to activities spread across the period with no fixed day.
 
 **Two recurring event days per period (e.g. Tuesday and Thursday):**
-The system supports one Anchor Day per series definition. To track a recurring activity that happens on two specific days per week, create two separate definitions — one anchored to Tuesday, one to Thursday — each with `Once per period`. Using `Minimum 2 per period` with no anchor would give you a due date at end of period but would not enforce the specific days.
+The system supports one Anchor Day per series definition. To track a recurring activity that happens on two specific days per week, create two separate definitions — one anchored to Tuesday, one to Thursday — each with `Once per period`. Using `Minimum 2 per period` with no anchor would give you a due date spanning the full period but would not enforce the specific days.
 
 **Applying RTD config changes immediately:**
 Changing an RTD's `Period`, `Cadence Type`, or `N Cadence` doesn't trigger governance right away — the change takes effect at the next daemon startup or daily governance cron. To apply it immediately without waiting: set the RTD's Status to inactive, wait one poll cycle (default 60s), then set it back to Active. The Status → Active transition triggers an immediate governance run that drift-corrects all affected tasks. A one-click Force Governance option is planned as part of the Automation Hub.
@@ -453,6 +453,25 @@ includes(["Not started", "Todo", "On hold", "In progress"], prop("Status"))
 List only your open states here — the field name `is Open` should reflect that: it returns true only for tasks that are still in progress. Update the status option names to match your database. The overdue check handles both date-only and date+time fields: date+time compares directly to `now()`; date-only adds one day since a date with no time represents the whole day.
 
 Note: Notion evaluates all branches of `and()`/`or()` — there is no short-circuit evaluation. Design formulas accordingly.
+
+**Due Date sort helper (formula field):**
+Add a formula field to your task database to sort tasks by Due Date in a way that keeps active tasks at the top. Helps sort tasks by Due Date: if a date range is active now, returns `now()` so the task sorts as a "today" task; if the range has ended, returns the end date; if Due Date is empty, returns a far-future date so the task sorts to the bottom.
+
+```
+if(
+  empty(prop("Due Date")),
+  parseDate("2999-01-01T00:01Z"),
+  if(
+    now() >= dateStart(prop("Due Date")) and now() <= dateEnd(prop("Due Date")),
+    now(),
+    if(
+      now() > dateEnd(prop("Due Date")),
+      dateEnd(prop("Due Date")),
+      dateStart(prop("Due Date"))
+    )
+  )
+)
+```
 
 ---
 

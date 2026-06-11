@@ -269,11 +269,11 @@ The key pattern: during the startup governance pass, `prev_page=page` is passed 
 
 **Notion fields required:**
 
-| Field | Type |
-|---|---|
-| `Status` | Status |
-| `Closed Date` | Date |
-| `Reopen Count` | Number |
+| Field              | Type                                                                     |
+| --------------------| --------------------------------------------------------------------------|
+| `Status`           | Status                                                                   |
+| `Closed Date`      | Date                                                                     |
+| `Reopen Count`     | Number                                                                   |
 | `Recurring Series` | Relation (read-only check — bot never writes this in `auto_closed_date`) |
 
 ---
@@ -327,26 +327,26 @@ Recurring tasks enable habit and responsibility tracking by creating a new task 
 
 The definitions database is created manually by the user (see README §6). Automated creation via the Project Page is planned (see STATUS.md Planned Features).
 
-| Field                  | Type                   | Notes                                                                                                                                                                                                                                                                                                           |
-| ------------------------| ------------------------| -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Name                   | Title                  |                                                                                                                                                                                                                                                                                                                 |
-| Type                   | Select                 | `Habit`, `Bad Habit`, `Responsibility`. See Task type behaviour below.                                                                                                                                                                                                                                          |
-| Active                 | Status                 | Set to `Active` to enable; any other value pauses the series without deleting. Bot filters via `{"property": "Status", "status": {"equals": "Active"}}` — group membership is irrelevant.                                                                                                                       |
-| Cadence Type           | Select                 | `Once per period`, `Exactly N per period`, `At most N per period`, `Minimum N per period`, `Unlimited`. **Bad Habit ignores this field — always treated as Unlimited.**                                                                                                                                         |
-| N Cadence              | Number                 | Used by `Exactly N per period`, `At most N per period`, and `Minimum N per period`; blank for others. **Bad Habit: ignored.**                                                                                                                                                                                   |
-| Period                 | Select                 | `Day`, `Week`, `Month`, `Year`. **Bad Habit: used for Instance # reset cadence only — no effect on due dates or cadence limits.**                                                                                                                                                                               |
-| Anchor Day             | Number                 | Mon=1 … Sun=7 for weekly; 1–31 for monthly (overflows to last day of month); 1–365 for yearly (day of year, overflows to Dec 31). **Bad Habit: ignored.**                                                                                                                                                       |
-| Anchor Time            | Text                   | e.g. `13:00`; blank = no specific time. **Bad Habit: ignored.**                                                                                                                                                                                                                                                 |
-| Grace Period (days)    | Number                 | Responsibilities only — auto-cancelled this many days past due. Blank = 0 (cancel on the day governance first sees it overdue). Use `Do Not Autoclose` to suppress cancellation entirely. **Bad Habit: ignored.**                                                                                               |
-| Do Not Autoclose       | Checkbox               | Default: False. When True, suppresses grace-period auto-cancellation for this RTD regardless of Type or Grace Period value. Intended for Responsibilities the user never wants auto-cancelled.                                                                                                                  |
-| Tasks Done This Period | Number                 | **Bot-managed display field.** Incremented by the bot each time a task closes in the current period. Reset to 0 by the governance cron at period boundary. User should not edit. **Bad Habit and Unlimited: not tracked.**                                                                                      |
-| Current Period         | Date (start + end)     | **Bot-managed display field.** Updated by the governance cron to show the current period's date range (e.g. Apr 1 → Apr 30). **Bad Habit and Unlimited: not tracked.**                                                                                                                                          |
-| Notes                  | Rich Text              |                                                                                                                                                                                                                                                                                                                 |
-| Last Completed         | Rollup                 | Max of `Closed Date` from related tasks (Notion-computed)                                                                                                                                                                                                                                                       |
-| Number of Open Tasks   | Rollup                 | Count of related tasks where `Is Open` = true (Notion-computed via checkbox formula workaround — see §7.1 Is Open field)                                                                                                                                                                                        |
-| Bot Notes              | Rich Text              | **Bot-managed.** Written by GOVERNANCE functions via the Bot Notes accumulator. Contains a bulleted list of current issues (e.g. duplicate name warning). Cleared automatically when all issues are resolved. User should not edit — content is overwritten each governance run.                                |
-| Current Open Taskss     | Relation → MT Database | **Notion field not yet created — see PLANNED.md.** Bot tracks open tasks per RTD in memory; this Relation field exposes that tracking as a Notion property. Planned to hold all current bot-tracked open tasks (multi-relation). Required for deletion detection and one-click close button. |
-| Description            | Rich Text              |                                                                                                                                                                                                                                                                                                                 |
+| Field                  | Type                   | Notes                                                                                                                                                                                                                                                                                        |
+| ------------------------| ------------------------| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Name                   | Title                  |                                                                                                                                                                                                                                                                                              |
+| Type                   | Select                 | `Habit`, `Bad Habit`, `Responsibility`. See Task type behaviour below.                                                                                                                                                                                                                       |
+| Active                 | Status                 | Set to `Active` to enable; any other value pauses the series without deleting. Bot filters via `{"property": "Status", "status": {"equals": "Active"}}` — group membership is irrelevant.                                                                                                    |
+| Cadence Type           | Select                 | `Once per period`, `Exactly N per period`, `Maximum N per period`, `Minimum N per period`, `Unlimited`. **Bad Habit ignores this field — always treated as Unlimited.**                                                                                                                      |
+| N Cadence              | Number                 | Used by `Exactly N per period`, `Maximum N per period`, and `Minimum N per period`; blank for others. **Bad Habit: ignored.**                                                                                                                                                                |
+| Period                 | Select                 | `Day`, `Week`, `Month`, `Year`. **Bad Habit: used for Instance # reset cadence only — no effect on due dates or cadence limits.**                                                                                                                                                            |
+| Anchor Day             | Number                 | Mon=1 … Sun=7 for weekly; 1–31 for monthly (overflows to last day of month); 1–365 for yearly (day of year, overflows to Dec 31). **Bad Habit: ignored.**                                                                                                                                    |
+| Anchor Time            | Text                   | e.g. `13:00`; blank = no specific time. **Bad Habit: ignored.**                                                                                                                                                                                                                              |
+| Grace Period (days)    | Number                 | Responsibilities only — auto-cancelled this many days past due. Blank = 0 (cancel on the day governance first sees it overdue). Use `Do Not Autoclose` to suppress cancellation entirely. **Bad Habit: ignored.**                                                                            |
+| Do Not Autoclose       | Checkbox               | Default: False. When True, suppresses grace-period auto-cancellation for this RTD regardless of Type or Grace Period value. Intended for Responsibilities the user never wants auto-cancelled.                                                                                               |
+| Tasks Done This Period | Number                 | **Bot-managed display field.** Incremented by the bot each time a task closes in the current period. Reset to 0 by the governance cron at period boundary. User should not edit. **Bad Habit and Unlimited: not tracked.**                                                                   |
+| Current Period         | Date (start + end)     | **Bot-managed display field.** Updated by the governance cron to show the current period's date range (e.g. Apr 1 → Apr 30). **Bad Habit and Unlimited: not tracked.**                                                                                                                       |
+| Notes                  | Rich Text              |                                                                                                                                                                                                                                                                                              |
+| Last Completed         | Rollup                 | Max of `Closed Date` from related tasks (Notion-computed)                                                                                                                                                                                                                                    |
+| Number of Open Tasks   | Rollup                 | Count of related tasks where `Is Open` = true (Notion-computed via checkbox formula workaround — see §7.1 Is Open field)                                                                                                                                                                     |
+| Bot Notes              | Rich Text              | **Bot-managed.** Written by GOVERNANCE functions via the Bot Notes accumulator. Contains a bulleted list of current issues (e.g. duplicate name warning). Cleared automatically when all issues are resolved. User should not edit — content is overwritten each governance run.             |
+| Current Open Taskss    | Relation → MT Database | **Notion field not yet created — see PLANNED.md.** Bot tracks open tasks per RTD in memory; this Relation field exposes that tracking as a Notion property. Planned to hold all current bot-tracked open tasks (multi-relation). Required for deletion detection and one-click close button. |
+| Description            | Rich Text              |                                                                                                                                                                                                                                                                                              |
 
 
 #### Main task database additions
@@ -374,7 +374,7 @@ Fields specific to recurring task functionality are named with the suffix `(Recu
 | set        | set         | That day + time (e.g. Monday 1:00 PM)      |
 
 `Unlimited` cadence: no due date ever.
-`At most N per period` cadence: no due date ever — tracks occurrences, not scheduled events.
+`Maximum N per period` cadence: no due date ever — tracks occurrences, not scheduled events.
 `Bad Habit` type: no due date ever, regardless of any anchor settings.
 
 #### Instance # counting rules
@@ -386,7 +386,7 @@ Instance # is assigned at task creation by counting existing tasks, not by readi
 | Cadence type         | Instance # assigned to new task                           |
 | ----------------------| -----------------------------------------------------------|
 | Once per period      | Count of all tasks for this RTD in the current period + 1 |
-| At most N per period | Count of all tasks for this RTD in the current period + 1 |
+| Maximum N per period | Count of all tasks for this RTD in the current period + 1 |
 | Minimum N per period | Count of all tasks for this RTD in the current period + 1 |
 | Unlimited            | Count of all tasks for this RTD in the current period + 1 |
 
@@ -401,7 +401,7 @@ Instance # is assigned at task creation by counting existing tasks, not by readi
 
 **At the governance cron (period boundary carry-over):** Instance # on the carried-over open task is updated to: count of all tasks for this RTD in the new period + 1 (which will be 1 if no tasks exist yet for the new period).
 
-**At most N per period alert**: when the count for the current period reaches N, the bot creates the next task normally but flags the RTD (mechanism TBD — depends on Status Page / notification design).
+**Maximum N per period alert**: when the count for the current period reaches N, the bot creates the next task normally but flags the RTD (mechanism TBD — depends on Status Page / notification design).
 
 **Re-opened tasks:** Instance # is left unchanged. A re-open is the same task instance returning — its original sequence position stands. No renumbering occurs.
 
@@ -524,7 +524,7 @@ The governance cron runs the full governance suite. At period boundary it perfor
 If the current open task's **Due Date** falls in a previous period (i.e. the task was never closed and carried over), it is stale. For Responsibilities, the grace-period-cap auto-cancel handles this. For other types, governance updates the display fields:
 
 - Update `Period Key (Recurring Task)` (display label) to the current period key
-- Update `Occurrence # this Period (Recurring Task)` per the cadence rules: reset to 1 for `Once per period`, `At most N per period`, `Minimum N per period`; continue incrementing for `Unlimited`; never reset for `Bad Habit`
+- Update `Occurrence # this Period (Recurring Task)` per the cadence rules: reset to 1 for `Once per period`, `Maximum N per period`, `Minimum N per period`; continue incrementing for `Unlimited`; never reset for `Bad Habit`
 
 This keeps the open task's bot-managed fields accurate without closing or replacing it.
 
@@ -535,7 +535,7 @@ If the cron finds an open task with a `Due Date` that fell in a future period th
 - Assign it the next `Instance #` in sequence and the current `Period Key`
 - If the cadence limit for the current period has **not** been reached (e.g. `Minimum N per period`, `Unlimited`):
   - Keep the existing bot-created `Current Open Tasks` as-is; the user's task coexists
-- If the cadence limit **has** been reached (e.g. `Once per period`, `At most N per period` where N is met):
+- If the cadence limit **has** been reached (e.g. `Once per period`, `Maximum N per period` where N is met):
   - Archive the bot-created task (`archive_page()`) — preserves data, removes from queries, prevents automation re-trigger
   - Set `Current Open Tasks` on the RTD to the user-created task
   - The user-created task becomes the authoritative current task
@@ -592,6 +592,22 @@ Resolved design decisions. Each entry states the rule and the reason so future c
 
 ---
 
+**[Icon inheritance] When creating a recurring task, the bot copies the RTD's icon to the new task.**
+- `emoji` and `external` icon types are copied. `file` type (Notion-hosted uploads) is skipped — the hosted URL is not reliably writable via API.
+- If the RTD has no icon, the task is created without one (no change to current behavior).
+- Icon is passed via the `icon` param added to `create_page` in `notion_api.py`. Applied to both the primary create call and the fallback retry (no inherited fields).
+- Always-on; not config-controlled. Configurable field inheritance belongs in the Automation Hub.
+
+**[RTD optional field defaults] Empty or unrecognized RTD field values use safe defaults rather than erroring.**
+- `Type` empty or unknown → default to `"Habit"`, log a WARNING. Habit is the least-destructive default: no grace period, no auto-cancel, no quota logic.
+- `Anchor Time` empty → no time constraint; Due Date is a date range covering the full period.
+- `Anchor Day` empty → full period range. (Previously produced an end-of-period anchor for non-Day periods; changed to full range for consistency with the Due Date Sort formula pattern.)
+- `Grace Period` empty or None → treat as 0 (cancel on due date, no buffer).
+- `Anchor Time` set without `Anchor Day` on non-Day periods → Anchor Time is ignored, full period range returned, WARNING logged. Anchor Time is only meaningful paired with an Anchor Day target day.
+- All three Type guard sites in `recurring_tasks.py` apply this default: `_create_next_task`, `run_recurring_governance`, and the init block of `auto_recurring_tasks`.
+
+---
+
 ### Task & Series Behavior
 
 **[Q1] When a recurring task is deleted or archived, the bot creates a replacement — not deactivates the RTD.**
@@ -637,14 +653,14 @@ Resolved design decisions. Each entry states the rule and the reason so future c
 
 ### Governance Behavior
 
-**[Q2a] Cadence type formerly called "N per period" is renamed "At most N per period".**
-- Reason: "N per period" implied exactly N. "At most N" correctly frames it as a soft cap — the bot continues creating tasks past N but alerts the user. Instance # increments within the period and resets at period boundary via the governance cron.
-- No due dates for this cadence type — occurrence tracking only. Enforced in `_calc_due_date`: `At most N per period` returns `None` alongside `Unlimited`.
+**[Q2a] Cadence type formerly called "N per period" is renamed "Maximum N per period".**
+- Reason: "N per period" implied exactly N. "Maximum N" correctly frames it as a soft cap — the bot continues creating tasks past N but alerts the user. Instance # increments within the period and resets at period boundary via the governance cron.
+- No due dates for this cadence type — occurrence tracking only. Enforced in `_calc_due_date`: `Maximum N per period` returns `None` alongside `Unlimited`.
 - Alert mechanism when N is reached: `RTD_AT_MOST_N_REACHED` Bot Note on the RTD (see [Q12]).
 
 **[Q2a-ii] "Exactly N per period" is the canonical name for the hard-quota cadence type. The legacy Notion select option "N per period" must be renamed.**
 - Behavior: governance counts completions in the current period (excluding cancelled/skipped). When count ≥ N, the next task is routed to the next period (`force_next=True`). If completions somehow exceed N, `RTD_EXACTLY_N_EXCEEDED` Bot Note is added to the RTD.
-- Differs from "At most N per period": "At most N" is a soft cap (bot keeps creating, just warns). "Exactly N" is a hard quota (bot routes to next period once N is met).
+- Differs from "Maximum N per period": "Maximum N" is a soft cap (bot keeps creating, just warns). "Exactly N" is a hard quota (bot routes to next period once N is met).
 - The legacy code normalization (`"N per period" → "Exactly N per period"`) remains in the code as a backward-compatibility shim. Renaming the Notion select option to `"Exactly N per period"` is recommended but not required.
 
 **[Q2b] Three RTD types: Habit, Bad Habit, Responsibility — all in one RTD database.**
@@ -682,7 +698,7 @@ Resolved design decisions. Each entry states the rule and the reason so future c
 - If calendar integration is ever needed, the recommended path is a Notion → Google Calendar sync via an external automation tool (e.g. Make, Zapier) rather than logic in this daemon.
 - Classified as "not ever" for practical purposes — not due to lack of interest, but because it sits below items that don't yet have names on the priority list, and the fundamental platform mismatch (Notion ≠ calendar app) makes this the wrong place to solve it regardless of priority. This entry exists to record the decision so it is not re-litigated.
 
-**[Q12] "At most N per period" limit reached: surfaced via `Bot Notes` on the RTD.**
+**[Q12] "Maximum N per period" limit reached: surfaced via `Bot Notes` on the RTD.**
 - Issue code: `RTD_AT_MOST_N_REACHED`. Written by `run_recurring_governance` when the count of tasks for the current period meets or exceeds N. Cleared when the period rolls over.
 - The bot continues creating tasks past N — the note is informational, not a hard stop.
 

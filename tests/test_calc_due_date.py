@@ -7,7 +7,7 @@ Design rules (agreed):
   3. Period=Day + AnchorTime → single datetime (that day at anchor time, no end)
   4. Week/Month, AnchorDay set, no AnchorTime → single-day range on that anchor day (day_start_hour adjusted)
   5. Any period, AnchorDay + AnchorTime set → single datetime on anchor day at anchor time (no end)
-  6. Habit / Bad Habit / Unlimited / At most N → no due date
+  6. Habit / Bad Habit / Unlimited / Maximum N → no due date
   7. After midnight before day_start_hour → due date is for the PREVIOUS logical day's period
 
 Range format:
@@ -67,7 +67,7 @@ class TestCalcDueDateSkipped:
 
     def test_bad_habit_returns_none(self):
         now = local_dt(2026, 6, 3, 10, 0)
-        assert calc("At most N per period", "Day", None, None, False, "Bad Habit", now) is None
+        assert calc("Maximum N per period", "Day", None, None, False, "Bad Habit", now) is None
 
     def test_unlimited_returns_none(self):
         now = local_dt(2026, 6, 3, 10, 0)
@@ -198,6 +198,15 @@ class TestCalcDueDateWeek:
         start, end = parse_notion_date(result)
         assert start.date() == datetime(2026, 5, 25).date(), \
             f"Expected week starting May 25, got {start.date()}"
+
+    def test_week_anchor_time_no_anchor_day_is_full_period_range(self):
+        # Anchor Time without Anchor Day for non-Day period → full period range (anchor_time ignored)
+        now = local_dt(2026, 6, 3, 10, 0)  # Wednesday June 3
+        result = calc("Once per period", "Week", None, "09:00", False, "Responsibility", now)
+        start, end = parse_notion_date(result)
+        assert start is not None and end is not None, "Should return a range, not a point-in-time"
+        assert start.date() == datetime(2026, 6, 1).date()  # Monday (week start)
+        assert end.date() == datetime(2026, 6, 8).date()    # Monday of next week (-1 min)
 
     def test_week_anchor_day_no_anchor_time_is_single_day_range(self):
         # AnchorDay=5 (Friday), no AnchorTime → range spanning that Friday (day_start_hour adjusted)

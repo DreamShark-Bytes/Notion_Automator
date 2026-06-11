@@ -384,12 +384,12 @@ def _calc_due_date(
     if task_type in ("Habit", "Bad Habit"):
         return None
 
-    # "At most N per period" is a restriction cadence — no due date by design.
+    # "Maximum N per period" is a restriction cadence — no due date by design.
     # (Bad Habit is the intended type; other types are a misconfiguration.)
-    if cadence_type == "At most N per period":
+    if cadence_type == "Maximum N per period":
         if task_type != "Bad Habit":
             logger.warning(
-                f"RTD {def_id}: 'At most N per period' cadence used with "
+                f"RTD {def_id}: 'Maximum per period' cadence used with "
                 f"Task Type='{task_type}' — this cadence is intended for Bad Habit only. "
                 "No due date will be set."
             )
@@ -470,22 +470,9 @@ def _calc_due_date(
                     add_bot_note(def_id, RTD_INVALID_ANCHOR_TIME,
                                  f"Anchor Time '{anchor_time}' could not be parsed (expected HH:MM). Due Date set to day range.")
         else:
-            # Anchor time without anchor day for non-Day periods: apply to end-of-period date.
-            # (Intended use is AnchorTime + AnchorDay; this is a configuration edge case.)
-            next_target, _ = _period_dates(period, None, True, target)
-            period_end_date = next_target - timedelta(days=1)
-            try:
-                h, m = _parse_anchor_time(anchor_time)
-                dt = period_end_date.replace(hour=h, minute=m, second=0, microsecond=0)
-                if not use_next_period and dt < now and now.date() == adjusted_now.date():
-                    next_next_target, _ = _period_dates(period, None, True, next_target)
-                    dt = (next_next_target - timedelta(days=1)).replace(hour=h, minute=m, second=0, microsecond=0)
-                return {"date": {"start": dt.isoformat(), "end": None}}
-            except Exception:
-                logger.warning(f"Could not parse anchor_time '{anchor_time}' — falling back to full period range.")
-                if def_id:
-                    add_bot_note(def_id, RTD_INVALID_ANCHOR_TIME,
-                                 f"Anchor Time '{anchor_time}' could not be parsed (expected HH:MM). Due Date set to period range.")
+            # Anchor Time without Anchor Day for non-Day periods: meaningless without a target day.
+            # Fall through to full period range.
+            logger.warning(f"RTD {def_id}: Anchor Time is set but Anchor Day is not for a non-Day period — Anchor Time ignored. Due Date set to full period range.")
 
     # Rule 1 / Rule 2: full period range — start at day_start_hour, end at next period start − 1 min.
     next_target, _ = _period_dates(period, None, True, target)
@@ -505,8 +492,8 @@ def _build_period_target(cadence_type: str | None, cadence_n: float | None, peri
     p = period or "period"
     if cadence_type == "Once per period":
         return f"1 per {p}"
-    if cadence_type == "At most N per period":
-        return f"At most {n} per {p}"
+    if cadence_type == "Maximum N per period":
+        return f"Maximum {n} per {p}"
     if cadence_type == "Exactly N per period":
         return f"Exactly {n} per {p}"
     if cadence_type == "Minimum N per period":
@@ -731,9 +718,14 @@ def _create_next_task(
 ) -> None:
     """Create the next recurring task based on the closed task and its definition."""
     cadence_type = _get_select(definition, "Cadence Type")
-    if cadence_type == "N per period":  # legacy name, normalized to current name
+    if cadence_type == "N per period":  # legacy name
         cadence_type = "Exactly N per period"
+    if cadence_type == "At most N per period":  # legacy name
+        cadence_type = "Maximum N per period"
     task_type    = _get_select(definition, "Type")
+    if task_type not in {"Habit", "Responsibility", "Bad Habit"}:
+        logger.warning(f"RTD '{def_name}': Type is '{task_type}' — unrecognized or empty, defaulting to 'Habit'.")
+        task_type = "Habit"
     period = _get_select(definition, "Period")
     anchor_day_raw = _get_number(definition, "Anchor Day")
     anchor_day = int(anchor_day_raw) if anchor_day_raw is not None else None
@@ -783,7 +775,7 @@ def _create_next_task(
         if cadence_type == "Once per period":
             n_threshold = 1
         elif cadence_n is not None and cadence_type in (
-            "Exactly N per period", "At most N per period"
+            "Exactly N per period", "Maximum N per period"
         ):
             n_threshold = int(cadence_n)
             if n_threshold < 1:
@@ -887,8 +879,12 @@ def _create_next_task(
         logger.error("Cannot create recurring task: no tasks database ID available.")
         return
 
+    rtd_icon = definition.get("icon")
+    if rtd_icon and rtd_icon.get("type") == "file":
+        rtd_icon = None  # file URLs are not reliably writable via API
+
     try:
-        new_page = client.create_page(db_id, _filter_optional(props))
+        new_page = client.create_page(db_id, _filter_optional(props), icon=rtd_icon)
         logger.info(f"Created recurring task for definition {definition_id}, instance #{new_instance}.")
         return new_page
     except Exception as e:
@@ -904,7 +900,7 @@ def _create_next_task(
                 f"({notion_msg or e}). Retrying without inherited fields."
             )
             try:
-                new_page = client.create_page(db_id, _filter_optional(base_props))
+                new_page = client.create_page(db_id, _filter_optional(base_props), icon=rtd_icon)
                 logger.info(f"Created recurring task for definition {definition_id}, instance #{new_instance} (no inherited fields).")
                 return new_page
             except Exception as e2:
@@ -987,6 +983,10 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
         def_id = definition["id"]
         def_name = _get_title(definition)
         cadence_type = _get_select(definition, "Cadence Type")
+        if cadence_type == "N per period":  # legacy name
+            cadence_type = "Exactly N per period"
+        if cadence_type == "At most N per period":  # legacy name
+            cadence_type = "Maximum N per period"
         cadence_n = _get_number(definition, "N Cadence")
         period = _get_select(definition, "Period")
         current_period_key = _period_key(period, now) if period else None
@@ -1005,6 +1005,9 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
         # --- Grace period: auto-cancel overdue Responsibility tasks ---
         # Runs before the 0/multiple-open check so cancelled tasks don't count.
         task_type = _get_select(definition, "Type")
+        if task_type not in {"Habit", "Responsibility", "Bad Habit"}:
+            logger.warning(f"RTD '{def_name}': Type is '{task_type}' — unrecognized or empty, defaulting to 'Habit'.")
+            task_type = "Habit"
         cancelled_ids: set[str] = set()
         cancelled_tasks: list[dict] = []
         reconcile_active = _reconcile_period_key or _reconcile_period_target or _reconcile_occurrence_number
@@ -1105,7 +1108,7 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
             if period and cadence_type != "Unlimited" and current_period_key:
                 if cadence_type == "Once per period":
                     n_threshold = 1
-                elif cadence_n is not None and cadence_type in ("At most N per period", "Exactly N per period"):
+                elif cadence_n is not None and cadence_type in ("Maximum N per period", "Exactly N per period"):
                     n_threshold = int(cadence_n)
                 else:
                     n_threshold = None
@@ -1290,14 +1293,14 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
                     if not task_cancelled:
                         current_occurrence += 1
 
-        # --- At most N alert (breach only — count == N is the happy path) ---
-        if cadence_type == "At most N per period" and cadence_n is not None:
+        # --- Maximum alert (breach only — count == N is the happy path) ---
+        if cadence_type == "Maximum N per period" and cadence_n is not None:
             count = _count_tasks_in_period_from_list(all_tasks, def_id, period, current_period_key)
             if count > int(cadence_n):
                 add_bot_note(
                     def_id,
                     RTD_AT_MOST_N_REACHED,
-                    f"'At most N per period' cap of {int(cadence_n)} exceeded "
+                    f"'Maximum per period' cap of {int(cadence_n)} exceeded "
                     f"({count} task(s) exist this period). Manual cleanup needed.",
                 )
                 logger.info(f"At-most-N cap exceeded for '{def_name}': {count}/{int(cadence_n)}")
@@ -1375,8 +1378,10 @@ def auto_recurring_tasks(client: "NotionClient", page: dict, prev_page: dict | N
         if instance_num is None:
             period = _get_select(definition, "Period")
             cadence_type = _get_select(definition, "Cadence Type")
-            if cadence_type == "N per period":  # legacy name, normalized to current name
+            if cadence_type == "N per period":  # legacy name
                 cadence_type = "Exactly N per period"
+            if cadence_type == "At most N per period":  # legacy name
+                cadence_type = "Maximum N per period"
             cadence_n = _get_number(definition, "N Cadence")
             anchor_day_raw = _get_number(definition, "Anchor Day")
             anchor_day = int(anchor_day_raw) if anchor_day_raw is not None else None
@@ -1392,6 +1397,9 @@ def auto_recurring_tasks(client: "NotionClient", page: dict, prev_page: dict | N
             current_pk = _period_key(period, pk_dt) if period else None
 
             task_type = _get_select(definition, "Type")
+            if task_type not in {"Habit", "Responsibility", "Bad Habit"}:
+                logger.warning(f"RTD '{_get_title(definition)}': Type is '{task_type}' — unrecognized or empty, defaulting to 'Habit'.")
+                task_type = "Habit"
             count = _count_tasks_in_period(client, definition["id"], period, current_pk)
             updates: dict = {"Occurrence # this Period (Recurring Task)": {"number": count + 1}}
             if current_pk:
@@ -1413,6 +1421,10 @@ def auto_recurring_tasks(client: "NotionClient", page: dict, prev_page: dict | N
         # Task is already initialized — sync Period Target in case RTD Cadence Type changed.
         period = _get_select(definition, "Period")
         cadence_type = _get_select(definition, "Cadence Type")
+        if cadence_type == "N per period":  # legacy name
+            cadence_type = "Exactly N per period"
+        if cadence_type == "At most N per period":  # legacy name
+            cadence_type = "Maximum N per period"
         cadence_n = _get_number(definition, "N Cadence")
         expected_target = _build_period_target(cadence_type, cadence_n, period)
         current_target = _get_text(page, "Period Target (Recurring Task)")
