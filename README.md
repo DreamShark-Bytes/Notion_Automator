@@ -277,6 +277,7 @@ Create a new database in Notion with these fields:
 | Anchor Day          | Number    | Mon=1 … Sun=7 for weekly; 1–31 for monthly (overflows to last day of month)                            |
 | Anchor Time         | Text      | e.g. `13:00`; blank = no specific time                                                                 |
 | Grace Period (days) | Number    | Responsibilities only — auto-cancelled this many days past due; blank = never                          |
+| Current Period      | Date      | Optional — bot writes the current period's start and end datetimes each governance pass; enables Notion formulas that filter tasks to the current period |
 | Notes               | Rich Text |                                                                                                        |
 | Last Completed      | Rollup    | Max of `Closed Date` from related tasks                                                                |
 
@@ -320,7 +321,9 @@ tasks_db_id       = "your-tasks-database-id"
 
 - **One open task per series at all times.** When a task is marked Done or Cancelled, the bot creates the next one automatically.
 - **Due dates** are calculated from Anchor Day and Anchor Time. Without an anchor, the due date is a range spanning the full period (e.g. April 1–30 for a monthly task).
-- **Occurrence #** counts completions within the current period. Resets to 1 at the start of each new period for `Once per period` and `Exactly N per period`; continues incrementing for `Minimum N per period` and `Unlimited`.
+- **Habit Due Dates** — Habit tasks receive a Due Date spanning the full period, making them visible in Notion's Today and This Week calendar views. At each period boundary, governance rolls the open Habit task forward to the new period: the Due Date is updated, Occurrence # resets to 1, and any `First Due Date` / `Due Date Update Count` tracking fields are cleared so the new period starts fresh. Habits are never cancelled or archived for being "overdue" — they simply carry forward.
+- **Minimum N carry-over** — When a `Minimum N per period` task is still open at period end and the minimum was already met, governance carries it forward into the new period (updating Due Date, Period Key, and resetting Occurrence # to 1) instead of archiving it. The opportunity to do more than the minimum is preserved.
+- **Occurrence #** counts how many tasks have been created for the current period. Resets to 1 at each period boundary for all series types. Continues incrementing within a period for `Minimum N per period` and `Unlimited` cadences.
 - **Grace period** (Responsibilities only): if a task is still open more than N days past its due date, the bot cancels it and creates the next one.
 - **Startup governance**: on every daemon start, the bot checks that each Active series has exactly one open task for the current period. Zero → creates one. Multiple → logs a warning for manual resolution.
 - **Live monitoring**: the definitions database is polled alongside your task databases. Creating a new definition or toggling one to `Active` triggers governance within one poll cycle — no restart needed.
@@ -454,6 +457,17 @@ List only your open states here — the field name `is Open` should reflect that
 
 Note: Notion evaluates all branches of `and()`/`or()` — there is no short-circuit evaluation. Design formulas accordingly.
 
+**`Current Period` field — filtering tasks to the current period in Notion:**
+Add a `Current Period` Date field to your definitions database. Governance writes the current period's start and end datetimes to it on every governance pass. You can then use a Notion formula on your task pages to check whether a task's Due Date falls within the current period:
+
+```
+prop("Recurring Series").map(current.prop("Current Period")).map(
+  dateStart(current) <= prop("Due Date") and dateEnd(current) >= prop("Due Date")
+).includes(true)
+```
+
+Pair this with a rollup on the definitions database to count tasks completed this period — more accurate than a bot-maintained counter and requires no extra writes.
+
 **Due Date sort helper (formula field):**
 Add a formula field to your task database to sort tasks by Due Date in a way that keeps active tasks at the top. Helps sort tasks by Due Date: if a date range is active now, returns `now()` so the task sorts as a "today" task; if the range has ended, returns the end date; if Due Date is empty, returns a far-future date so the task sorts to the bottom.
 
@@ -515,7 +529,8 @@ Developed in collaboration with [Claude Code](https://claude.ai/code) by Anthrop
 
 See `PLANNED.md` for full details.
 
-- **Automation Hub** — A single Notion page as the daemon's home base. Auto-creates required databases on first run, surfaces health and status information, and eventually replaces `config.toml` for behavioral settings that change frequently.
+- **Automation Hub** — A single Notion page as the daemon's home base. Surfaces health, errors, and warnings; eventually replaces `config.toml` for behavioral settings that change frequently.
+- **Extended Cadence** — Support for cadences spanning multiple periods (bi-weekly, quarterly, etc.) with a simplified picker and a Custom mode.
+- **First Value Field Tracking** — Automatically stamp a `First [Field Name]` column with the first observed value of any configured field.
 - **Notifications** — Outbound webhook support (Discord, Telegram) for alerts on governance events.
 - **Change Tracking** — Opt-in field change log with old/new values and timestamps, feeding into reporting tools.
-- **First Value Field Tracking** — Automatically stamp a `First [Field Name]` column with the first observed value of any configured field. Currently only recording `First Due Date`.

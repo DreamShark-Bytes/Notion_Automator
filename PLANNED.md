@@ -6,7 +6,7 @@ Living design document. Sections are deleted when a feature is implemented and i
 
 ## Contents
 
-- [Extended Cadence (Every Y Periods)](#feature-extended-cadence-every-y-periods)f
+- [Extended Cadence (Every Y Periods)](#feature-extended-cadence-every-y-periods)
 - [Governance Schema Validation](#improvement-governance-schema-validation)
 - [Schema-Check Safety Net in automations.py](#improvement-schema-check-safety-net-in-automationspy)
 - [Minimum N — Carry-Over Instead of Archive](#improvement-minimum-n-per-period--carry-over-instead-of-archive)
@@ -16,20 +16,17 @@ Living design document. Sections are deleted when a feature is implemented and i
 - [Clear Blocking/Blocked-By on Close](#clear-blockingblocked-by-on-close)
 - [First Value Field Tracking](#first-value-field-tracking)
 - [Field Update Count (Abstract)](#improvement-field-update-count-abstract)
-- [RTD Display Fields (Current Period)](#improvement-rtd-display-fields-current-period)
+- [RTD Current Period Field](#improvement-rtd-current-period-field)
 - [Timer / Mission Tracking](#timer--mission-tracking)
 - [Automated Testing](#automated-testing)
 - [Bulk Edit Tool](#bulk-edit-tool-tools)
-- [Current Open Tasks Field](#current-open-tasks-field)
-- [One-click Close Button (RTD Home Page)](#one-click-close-button-rtd-home-page)
 - [Habit Due Dates with Rolling Forward](#habit-due-dates-with-rolling-forward)
+- [Companion: Siri Shortcuts Integration](#companion-siri-shortcuts-integration)
 - [Range Cadence (At Least N, At Most M)](#range-cadence-at-least-n-at-most-m)
 - [Task Templates](#task-templates)
-- [Undeveloped Ideas](#undeveloped-ideas)
+- [Demo Setup Script](#demo-setup-script)
 
 ---
-
-
 
 ## Feature: Extended Cadence (Every Y Periods)
 
@@ -456,25 +453,25 @@ These answer different questions. First Value = "what was this when first observ
 
 ---
 
-## Improvement: RTD Display Fields (Current Period)
+## Improvement: RTD Current Period Field
 
 **Status:** Pre-design
-**One-liner:** Bot-written `Current Period` Date field on the RTD showing the current period's start and end dates — enables Notion formula fields and rollups that filter tasks by current period.
+**One-liner:** Bot-written `Current Period` Date field (start + end) on the RTD — enables Notion formula fields, rollups filtering tasks by current period, and Siri Shortcuts period-aware task lookup.
 
 ### Design
 - Field: `Current Period` — Date (start + end) on the RTD database
 - Governance writes this field on every governance pass (cron + startup + RTD activation)
 - Value: period start datetime → period end datetime for the current period
-- User may edit to shift boundaries (same pattern as Extended Cadence's `Current Period Start`)
+- Single date property with both start and end set — matches Notion's native date range format
 
 ### Why needed
-Notion formulas on task pages cannot compute period boundaries without a reference point. A formula using `.map(current.prop("Current Period"))` on the RTD relation can check whether a task's Due Date or Closed Date falls within the period — enabling "tasks this period" filters and rollups without bot involvement in per-task field writes.
+Notion formulas on task pages cannot compute period boundaries without a reference point. A formula using `.map(current.prop("Current Period"))` on the RTD relation can check whether a task's Due Date or Closed Date falls within the period — enabling "tasks this period" filters and rollups without bot involvement in per-task field writes. Also lets Siri Shortcuts read the period boundary directly rather than computing it from RTD fields.
 
 ### Note on Tasks Done This Period
 The `Tasks Done This Period` Number field (previously planned as a bot-maintained counter on the RTD) is dropped in favour of this approach. A Notion rollup counting tasks where the period formula is satisfied is more accurate and requires no bot maintenance.
 
 ### Dependencies
-- None — independent of `Current Open Tasks`
+- None — standalone governance write
 
 ---
 
@@ -506,17 +503,26 @@ The user maintains high-level mission/workbench areas in Notion. Each mission ha
 
 ### Decisions made
 - Defer until design settles. Most bugs have been in edge cases that manual testing catches well; a test suite written mid-churn would need constant rewriting.
-- Scope: pure logic functions only. Automation functions require mocked pages and a mocked client — high scaffolding cost for a personal project.
+- Scope: pure logic functions only for Phase 1 (done). Phase 2 adds `_create_next_task` tests via a mock `NotionClient` — same scaffolding covers multiple high-value cases.
 
-### Priority targets (highest bug history)
-- `_period_dates` — weekly anchor-day off-by-week bug (Z17) would have been caught
+### Phase 1 — done (63 tests, pure functions)
 - `_period_key` — period boundary edge cases
-- `_calc_due_date` — end-of-period, anchor day, monthly/weekly math
+- `_calc_due_date` — end-of-period, anchor day, monthly/weekly math, Habit Due Dates
+- `_is_overdue_by` — grace period precision
+
+### Phase 2 — mock `NotionClient` scaffolding (beachhead: `_create_next_task`)
+Build a minimal mock `NotionClient` that returns fabricated task lists from `query_database` and records `create_page` calls. All Phase 2 tests share this scaffolding.
+
+Priority targets once scaffolding exists:
+- **Icon inheritance** — emoji copied from RTD, file-type icon skipped, no icon when RTD has none
+- **Anchor-time duplicate prevention** — when anchor_time has passed for Period=Day, `_create_next_task` must correct `target_period_key` from the actual due date and skip creation if an open task already exists for that period. Without this test, the June 2026 regression (infinite duplicate creation) is not caught automatically.
+- **Minimum N carry-over** — governance carries stale task forward instead of archiving when minimum is met; no new task created
+- **Habit rolling-forward** — open Habit task from previous period gets Due Date reset to current period; no new task created
+- **Maximum N duplicate guard** — task creation skipped when current-period count already at cap
 
 ### What NOT to test (yet)
-- Automation functions (`auto_closed_date`, `auto_recurring_tasks`, etc.) — require mocked Notion API and fabricated page dicts; high scaffolding cost
-- Governance functions — require live or deeply mocked Notion state
-- Integration tests — require a real Notion workspace; better handled by the existing manual test plan
+- Full governance end-to-end — requires live or deeply mocked Notion state with all RTD and task page shapes
+- Integration tests — require a real Notion workspace; better handled by manual verification
 
 ### Dependencies
 - Feature set should be stable before investing in tests. Revisit after PowerBI pivot.
@@ -546,69 +552,6 @@ Power BI is read-only — no write-back possible. When analysis reveals data tha
 
 ---
 
-## Current Open Tasks Field
-
-**Status:** Pre-design
-**One-liner:** Bot-written Relation field on the RTD that tracks all currently open tasks for the series — exposes in-memory tracking as a visible Notion property.
-
-### Motivation
-The bot already tracks open tasks per RTD in memory (`open_tasks_by_def`). Exposing this as a Notion Relation field lets the user see exactly which tasks the bot considers active, making bot state visible and debuggable. Also a prerequisite for one-click close and deletion detection.
-
-### Design
-- Field type: Relation (multi) → task database
-- Bot writes this field on every governance pass: adds newly created tasks, removes tasks that entered the Complete group or were cancelled
-- All currently open tasks for the series are included (across periods — the user may have pre-created future-period tasks)
-- User should not edit — content is overwritten by governance
-
-### Required implementation behaviors
-All of the following must be implemented for this feature to be complete:
-
-1. **Write on task creation** — add newly created task to the relation
-2. **Clear on completion/cancellation** — remove task when it enters Complete group or is cancelled
-3. **Full refresh on RTD activation** — rebuild the relation from scratch when RTD transitions to Active
-4. **Q1-C promotion logic** — when a user-created future-period task becomes the current period's task, archive the bot-created task and update `Current Open Tasks` to point to the user's task (only if cadence limit is met)
-5. **Deletion detection** — when governance runs, fetch each task in `Current Open Tasks` directly via `GET /v1/pages/{id}`; treat 404 or `archived: true` as deletion; create replacement task with On Hold status and note
-6. **Recovery guard** — if a previously archived task is recovered from trash, it will appear as an open task alongside the replacement; do not auto-re-archive it; let governance drift-correct both tasks' fields and let them coexist
-
-### Governance interaction
-Governance writes this field when:
-- A new task is created (add to relation)
-- A task enters the Complete group (remove from relation)
-- A task is cancelled (remove from relation)
-- RTD transitions to Active (full refresh)
-- Period changes, `week_start`, or `day_start_hour` changes trigger governance via RTD activation
-
-### Blocks
-- One-click Close Button (requires this field as a Notion Button target)
-- Deletion detection (requires this field to check if the bot-tracked task still exists)
-
-### Dependencies
-- `notion_api.py` must support writing Relation properties
-- Governance must be updated to maintain this field on all relevant transitions
-
----
-
-## One-click Close Button (RTD Home Page)
-
-**Status:** Pre-design
-**One-liner:** A Notion Button field on the RTD (or a home page linking to RTDs) that closes the current period's open task with one tap — triggers normal next-task creation automatically.
-
-### Motivation
-Habits especially benefit from minimal friction. Currently closing a task requires opening it, changing the status, and waiting for the bot to create the next one. A button on the RTD row reduces this to one tap.
-
-### Design
-- Notion Button field on the RTD: "Complete Current Task"
-- Button action: "Edit pages in relation" → targets `Current Open Tasks` field → sets Status to Done (or equivalent Complete-group status)
-- Bot detects the status change on next poll → stamps Closed Date → creates next task normally
-- If multiple open tasks: button targets only the task in the current period (not future-period pre-created tasks). Design TBD — may require filtering in the button action or accepting that all open tasks are closed.
-- Applies to all task types (Habit, Responsibility, Bad Habit) — not Habit-only
-
-### Dependencies
-- `Current Open Tasks` field must be implemented first
-- Notion Buttons must support "filter by period" or user accepts all-open behavior
-
----
-
 ## Habit Due Dates with Rolling Forward
 
 **Status:** Pre-design
@@ -628,6 +571,44 @@ Currently Habits get no Due Date, so they never appear in Notion "today"/"this w
 
 ### Dependencies
 - `Current Open Tasks` field (for the open question above — not a blocker for the core rollover logic)
+
+---
+
+## Companion: Siri Shortcuts Integration
+
+**Status:** Pre-design (external to bot — no Notion_Automator code changes required)
+**One-liner:** iOS Siri Shortcuts that close the current period's open task for a given RTD via voice trigger — bot reacts on next poll exactly as for any manual close.
+
+### Design
+
+Two modes used together:
+
+**Per-RTD shortcuts (daily habits):**
+- Named e.g. "Notion Habit Physical Therapy" — zero friction, purely hands-free
+- Hardcoded RTD page ID; no user input or disambiguation step
+- Flow: read `Current Period` from RTD → query task DB for open tasks for that RTD in that period → PATCH first match to Done
+
+**Generic shortcut with Apple Intelligence (all other RTDs):**
+- Named e.g. "Complete Habit" — one shortcut handles everything without a dedicated per-RTD shortcut
+- Flow:
+  1. Query Active RTD definitions DB → collect RTD names
+  2. Siri asks "which one?" — user responds in natural language
+  3. Apple Intelligence matches response to closest RTD name (fuzzy — "the stretching one" resolves to "Daily PT Exercises")
+  4. Read `Current Period` from matched RTD → query open tasks in that period → PATCH first match to Done
+
+### Why `Current Period` matters here
+Without it, the shortcut must derive period boundaries from the RTD's Period, Anchor Day, and Anchor Time fields — doable but fragile. Reading `Current Period` directly from the RTD is simpler and always consistent with what governance computed.
+
+### What the bot does
+Nothing new. The shortcut PATCHes Status to Done; on the next poll the bot stamps Closed Date and creates the next task exactly as for any manual close.
+
+### Notes
+- The Notion API token must be stored in each shortcut. Acceptable for a personal device.
+- "Close one" behavior: if multiple tasks exist for the period (rare), the shortcut closes the first one returned by the Notion query. Period filtering via `Current Period` prevents accidentally closing a future-period task.
+
+### Dependencies
+- `RTD Current Period Field` feature — enables period-aware task filtering in the shortcut
+- iOS with Apple Intelligence for the generic shortcut's disambiguation; per-RTD shortcuts work without it
 
 ---
 
@@ -675,12 +656,82 @@ Notion's API supports templates via `GET /v1/data_sources/{db_id}/templates` (li
 
 ---
 
-## Undeveloped Ideas
+## Demo Setup Script
 
-Ideas raised but not designed. No open questions analyzed — revisit when the relevant feature area is active.
+**Status:** Pre-design
+**One-liner:** A script + definition file that programmatically creates and populates a demo Notion environment so screenshots are always current.
 
-- **Lookahead (Future Task Pre-creation)** — Auto-create tasks for N future periods so they appear on the calendar in advance. Deferred: the manual workaround (create a task with a future Due Date → bot initializes it) already serves the need and is more precise. Revisit if manual creation becomes burdensome at scale.
+### Motivation
+Maintaining a realistic-looking demo database by hand takes days and the data goes stale. A script that rebuilds it on demand with relative dates solves both problems.
 
-- **Specific Days (Recurring Tasks, multi-day per week)** — One RTD creates tasks on specific weekdays (e.g., Tuesday AND Thursday club meetings). Currently handled by two RTDs (one per day), which is clean and keeps tracking streams separate. Implementing this would require governance to create N tasks per week, one per selected day — a significant change to the governance loop. Two-RTD workaround is the current recommendation.
+### Decisions made so far
+- **Scope covers 3 databases:** Tasks (RTD-managed), Areas, Pursuits. Areas and Pursuits have 4–5 entries each — enough to make tasks feel grounded without cluttering the demo.
+- **No Notion views in v1** — schema and pages only.
+- **Requires `create_database()` in Notion_API** — makes the script self-contained (schema + content in one run). This is the primary motivation for building `create_database()`, which also unblocks Automation Hub.
+- **`week_start` sourced from `config.toml`** — already present; no new config entry needed.
+- **Timezone:** `datetime.now().astimezone()` — local time, no Notion API call needed.
+- **`created_time` is read-only in Notion's API** — workaround: populate a user-defined "Created Time (Manual)" date field instead. BI tools (Power BI) read this field first and fall back to Notion's `created_time`.
+- **Comments:** supported via a new `create_comment()` in Notion_API. 2–3 comments on select tasks to add realism.
+- **Icons:** already supported in `create_page(icon=...)`. Set on all demo pages.
+- **Shareable Notion template** (separate from this script) — worth considering as a complement: a "duplicate this" link lets users explore the database themselves without screenshots. Not a replacement for the script.
 
-- **New Anchor Types (Recurring Tasks)** — Apple Calendar-style rules for RTDs: "First Monday of the month", "Last weekday of the month", "Second Tuesday". Anchor Day on the RTD currently handles day-of-month (1–31) for monthly tasks. Supporting ordinal weekday logic ("nth weekday within a period") would require a new anchor type field on the RTD and additional calendar math. Dependency: Extended Cadence feature should land first since it touches the same period/anchor system.
+### Date expression format
+Expressions are strings evaluated at script runtime. Order of operations: week anchor → day offset → time.
+
+```
+"now"                        → datetime.now() (local)
+"-3d"                        → 3 days ago, same time
+"+1d 09:00"                  → tomorrow at 9am local
+"prev_monday"                → last Monday at midnight
+"prev_tuesday 09:00"         → last Tuesday at 9am
+"this_week_start"            → Monday (or Sunday per week_start) of current week
+"prev_week_start"            → Monday/Sunday of last week
+"prev_week_start +2d 14:00"  → 2 days into last week at 2pm
+```
+`prev_weekday` = the most recent occurrence of that weekday before today (never today).
+`this_week_start` respects `week_start` from `config.toml`.
+Month/year-level expressions deferred until needed.
+
+### demo_data.toml shape (rough)
+```toml
+[config]
+api_token_env = "NOTION_TOKEN"   # env var name to read token from
+parent_page_id = "abc123..."     # Notion page under which databases are created
+week_start = "Monday"            # optional override; default: read from config.toml
+
+[[databases]]
+key = "areas"
+name = "Areas"
+icon = "🗺️"
+
+  [[databases.areas.pages]]
+  name = "Vitality"
+  icon = "💪"
+
+[[databases]]
+key = "tasks"
+name = "Tasks"
+icon = "✅"
+
+  [[databases.tasks.pages]]
+  name = "Call dentist"
+  status = "Done"
+  due_date = "prev_monday 09:00"
+  close_date = "prev_monday +1d 11:30"
+  occurrence = 5
+  area = "vitality"        # references databases.areas page by name
+  icon = "📞"
+
+    [[databases.tasks.pages.comments]]
+    text = "Rescheduled — they had an opening earlier."
+```
+
+### Open questions
+- Does `create_database()` accept property type definitions as a dict, or should it take a typed schema object? (Affects Notion_API design, not just the demo.)
+- Re-run behavior: archive existing demo pages and recreate, or delete the whole database and recreate? Archive is safer (avoids accidental deletion of non-demo content if run against a wrong database).
+- Should the script accept a `--dry-run` flag that prints what it would create without calling the API?
+
+### Dependencies
+- `create_database()` in Notion_API (not yet built)
+- `create_comment()` in Notion_API (not yet built)
+

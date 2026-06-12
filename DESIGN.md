@@ -874,5 +874,33 @@ Features that were investigated and will not be implemented. Kept here so the ra
 - Cross-device behavior is broken regardless: clearing on desktop/web does not clear the iPhone app notification.
 - Workaround: "Archive All" button in the Inbox. Revisit only if Notion exposes an Inbox API.
 
+**[Rejected Approach] Current Open Tasks Field**
+- A bot-written Relation field on the RTD tracking all currently open tasks for the series.
+- Rejected because: (a) bot logs already provide adequate visibility into which tasks the bot considers active; (b) requires 5 distinct governance behaviors plus Notion_API changes for Relation property writes — high complexity for a debug-visibility feature; (c) the two features it was intended to unblock (One-click Close, Deletion Detection) have better alternative designs that don't require this field.
+- Alternatives: deletion detection can catch 404s when fetching task pages directly without a relation index on the RTD; One-click Close is better served by Siri Shortcuts (see PLANNED.md Companion section).
+
+---
+
+### Deferred & Undeveloped Ideas
+
+Ideas raised but deliberately not pursued in the near term. Kept here to preserve context and prevent re-litigating the same decision.
+
+**[Deferred] One-click Close Button**
+- A Notion Button field on the RTD marking the current period's open task as Done in one tap.
+- Deferred because: Notion has no native widget to display database rows with embedded action buttons outside of a full page view. The "Edit pages in relation" button action targets all linked pages, not just the current period's task — period filtering is not expressible in Notion Buttons. Siri Shortcuts (see PLANNED.md) cover the same need with better UX: voice-triggered, system-wide, works from lock screen and Apple Watch.
+- Revisit only if Notion adds per-row button filtering or a widget API.
+
+**[Undeveloped] Lookahead (Future Task Pre-creation)**
+- Auto-create tasks for N future periods so they appear on the calendar in advance.
+- Deferred: the manual workaround (create a task with a future Due Date → bot initializes it) already serves the need and is more precise. Revisit if manual creation becomes burdensome at scale.
+
+**[Undeveloped] Specific Days (Recurring Tasks, multi-day per week)**
+- One RTD creates tasks on specific weekdays (e.g., Tuesday AND Thursday club meetings).
+- Currently handled by two RTDs (one per day), which is clean and keeps tracking streams separate. Implementing this would require governance to create N tasks per week — a significant change to the governance loop. Two-RTD workaround is the current recommendation.
+
+**[Undeveloped] New Anchor Types (Recurring Tasks)**
+- Apple Calendar-style rules: "First Monday of the month", "Last weekday of the month", "Second Tuesday".
+- Depends on Extended Cadence landing first. Supporting ordinal weekday logic ("nth weekday within a period") would require a new anchor type field and additional calendar math.
+
 ---
 

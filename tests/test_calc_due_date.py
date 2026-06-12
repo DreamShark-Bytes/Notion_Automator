@@ -7,7 +7,7 @@ Design rules (agreed):
   3. Period=Day + AnchorTime → single datetime (that day at anchor time, no end)
   4. Week/Month, AnchorDay set, no AnchorTime → single-day range on that anchor day (day_start_hour adjusted)
   5. Any period, AnchorDay + AnchorTime set → single datetime on anchor day at anchor time (no end)
-  6. Habit / Bad Habit / Unlimited / Maximum N → no due date
+  6. Bad Habit / Unlimited / Maximum N → no due date; Habit now gets full period range (same as Responsibility)
   7. After midnight before day_start_hour → due date is for the PREVIOUS logical day's period
 
 Range format:
@@ -60,10 +60,6 @@ class TestCalcDueDateSkipped:
 
     def setup_method(self):
         recurring_tasks.init("fake-def-id", "fake-tasks-id", week_start_day=0, day_start_hour=3)
-
-    def test_habit_returns_none(self):
-        now = local_dt(2026, 6, 3, 10, 0)
-        assert calc("Once per period", "Day", None, None, False, "Habit", now) is None
 
     def test_bad_habit_returns_none(self):
         now = local_dt(2026, 6, 3, 10, 0)
@@ -359,3 +355,54 @@ class TestCalcDueDateYear:
         start, end = parse_notion_date(result)
         assert start.date() == datetime(2027, 1, 1).date()
         assert end.date() == datetime(2028, 1, 1).date()
+
+
+class TestCalcDueDateHabit:
+    """Habit tasks now get full period Due Dates (same as Responsibility)."""
+
+    def setup_method(self):
+        recurring_tasks.init("fake-def-id", "fake-tasks-id", week_start_day=0, day_start_hour=3)
+
+    def test_habit_week_no_anchor_gets_full_range(self):
+        now = local_dt(2026, 6, 15, 10, 0)  # Monday
+        result = calc("Once per period", "Week", None, None, False, "Habit", now)
+        start, end = parse_notion_date(result)
+        assert start is not None and end is not None
+        assert start.date() == datetime(2026, 6, 15).date()
+        assert start.hour == 3 and start.minute == 0
+        assert end.date() == datetime(2026, 6, 22).date()
+        assert end.hour == 2 and end.minute == 59
+
+    def test_habit_day_no_anchor_gets_full_day_range(self):
+        now = local_dt(2026, 6, 15, 10, 0)
+        result = calc("Once per period", "Day", None, None, False, "Habit", now)
+        start, end = parse_notion_date(result)
+        assert start is not None and end is not None
+        assert start.date() == datetime(2026, 6, 15).date()
+
+    def test_habit_day_with_anchor_time_gets_point_in_time(self):
+        now = local_dt(2026, 6, 15, 7, 0)  # 7am — before 9am anchor
+        result = calc("Once per period", "Day", None, "09:00", False, "Habit", now)
+        start, end = parse_notion_date(result)
+        assert end is None
+        assert start.hour == 9 and start.minute == 0
+        assert start.date() == datetime(2026, 6, 15).date()
+
+    def test_habit_month_gets_full_month_range(self):
+        now = local_dt(2026, 6, 15, 10, 0)
+        result = calc("Once per period", "Month", None, None, False, "Habit", now)
+        start, end = parse_notion_date(result)
+        assert start is not None and end is not None
+        assert start.date() == datetime(2026, 6, 1).date()
+        assert end.date() == datetime(2026, 7, 1).date()
+
+    def test_bad_habit_still_returns_none(self):
+        now = local_dt(2026, 6, 15, 10, 0)
+        assert calc("Maximum N per period", "Week", None, None, False, "Bad Habit", now) is None
+
+    def test_habit_use_next_period(self):
+        now = local_dt(2026, 6, 15, 10, 0)
+        result = calc("Once per period", "Week", None, None, True, "Habit", now)
+        start, end = parse_notion_date(result)
+        assert start is not None
+        assert start.date() == datetime(2026, 6, 22).date()
