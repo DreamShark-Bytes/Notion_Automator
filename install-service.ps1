@@ -11,10 +11,16 @@ $NssmPath   = "C:\Tools\nssm.exe"
 $Python  = "$ProjectDir\venv\Scripts\python.exe"
 
 & $NssmPath install NotionAutomator $Python "daemon.py"
-& $NssmPath set NotionAutomator AppDirectory  $ProjectDir
-& $NssmPath set NotionAutomator DisplayName   "Notion Automator"
-& $NssmPath set NotionAutomator Description   "Runs the Notion Automator daemon. Syncs and automates Notion task databases on a continuous loop."
-& $NssmPath set NotionAutomator Start         SERVICE_AUTO_START
+& $NssmPath set NotionAutomator AppDirectory           $ProjectDir
+& $NssmPath set NotionAutomator DisplayName            "Notion Automator"
+& $NssmPath set NotionAutomator Description            "Runs the Notion Automator daemon. Syncs and automates Notion task databases on a continuous loop."
+& $NssmPath set NotionAutomator Start                  SERVICE_AUTO_START
+# Give the daemon up to 8 seconds to exit cleanly before NSSM force-kills it.
+# Without this, Stop-Service returns before the Python process exits, and a
+# rapid Start-Service can launch a second instance alongside the old one.
+& $NssmPath set NotionAutomator AppStopMethodConsole   8000
+& $NssmPath set NotionAutomator AppStopMethodWindow    8000
+& $NssmPath set NotionAutomator AppStopMethodThreads   8000
 & $NssmPath start NotionAutomator
 
 Write-Host ""

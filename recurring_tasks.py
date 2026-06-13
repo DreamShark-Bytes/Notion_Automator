@@ -897,8 +897,20 @@ def _create_next_task(
     if rtd_icon and rtd_icon.get("type") == "file":
         rtd_icon = None  # file URLs are not reliably writable via API
 
+    def _do_create(page_props: dict) -> object:
+        """Call create_page with icon, degrading gracefully if Notion_API is pre-v1.1.2."""
+        if rtd_icon:
+            try:
+                return client.create_page(db_id, page_props, icon=rtd_icon)
+            except TypeError:
+                logger.warning(
+                    f"Notion_API does not support the 'icon' parameter — upgrade to v1.1.2+. "
+                    f"Task created without icon for '{def_name}'."
+                )
+        return client.create_page(db_id, page_props)
+
     try:
-        new_page = client.create_page(db_id, _filter_optional(props), icon=rtd_icon)
+        new_page = _do_create(_filter_optional(props))
         logger.info(f"Created recurring task for definition {definition_id}, instance #{new_instance}.")
         return new_page
     except Exception as e:
@@ -914,7 +926,7 @@ def _create_next_task(
                 f"({notion_msg or e}). Retrying without inherited fields."
             )
             try:
-                new_page = client.create_page(db_id, _filter_optional(base_props), icon=rtd_icon)
+                new_page = _do_create(_filter_optional(base_props))
                 logger.info(f"Created recurring task for definition {definition_id}, instance #{new_instance} (no inherited fields).")
                 return new_page
             except Exception as e2:
@@ -1033,78 +1045,75 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
             if not do_not_autoclose:
                 grace = _get_number(definition, "Grace Period (days)")
                 if grace is None:
-                    grace = 0  # No grace period set → cancel on due date
+                    grace = 1  # blank = 1-day grace (one governance cycle after period ends)
                 elif grace < 0:
                     logger.warning(f"RTD '{def_name}': Grace Period is negative ({grace}) — defaulting to 0.")
                     grace = 0
                 for task in open_tasks:
-                    ignore_prop = _get_prop(task, "Ignore Grace Period (Recurring Task)")
-                    if ignore_prop and ignore_prop.get("checkbox"):
-                        continue
-                    due = _get_due_end_or_start(task)
-                    if not due:
-                        continue
-                    # Derive task's period from Due Date end (or start) — consistent with how
-                    # all other governance period attribution works. The stored Period Key field
-                    # is never read here — it may be corrupted.
-                    if period:
-                        task_pk = _period_key(period, _get_due_end_or_start(task) or now)
-                    else:
-                        task_pk = None
-                    if _is_overdue_by(due, grace):
-                        reason = "grace period expired"
-                        task_name = _get_title(task)
-                        # For "Minimum N per period": if the minimum was met in the task's
-                        # period, archive instead of cancel — cancellation implies failure,
-                        # but the user succeeded. The archived task disappears from queries;
-                        # the existing create-task logic then creates a fresh task for the
-                        # new period without triggering Due Date Update Count.
-                        if cadence_type == "Minimum N per period" and task_pk and cadence_n is not None:
-                            n_min = int(cadence_n)
-                            completions_in_stale = sum(
-                                1 for t in all_tasks
-                                if def_id in _get_relation_ids(t, "Recurring Series")
-                                and _task_in_period(t, period, task_pk)
-                                and _get_status_group(client, t, "Status") == "Complete"
+                        ignore_prop = _get_prop(task, "Ignore Grace Period (Recurring Task)")
+                        if ignore_prop and ignore_prop.get("checkbox"):
+                            continue
+                        due = _get_due_end_or_start(task)
+                        if not due:
+                            continue
+                        # Derive task's period from Due Date end (or start) — consistent with how
+                        # all other governance period attribution works. The stored Period Key field
+                        # is never read here — it may be corrupted.
+                        if period:
+                            task_pk = _period_key(period, _get_due_end_or_start(task) or now)
+                        else:
+                            task_pk = None
+                        if _is_overdue_by(due, grace):
+                            reason = "grace period expired"
+                            task_name = _get_title(task)
+                            # For "Minimum N per period": if the minimum was met in the task's
+                            # period, carry forward instead of cancel.
+                            if cadence_type == "Minimum N per period" and task_pk and cadence_n is not None:
+                                n_min = int(cadence_n)
+                                completions_in_stale = sum(
+                                    1 for t in all_tasks
+                                    if def_id in _get_relation_ids(t, "Recurring Series")
+                                    and _task_in_period(t, period, task_pk)
+                                    and _get_status_group(client, t, "Status") == "Complete"
+                                )
+                                if completions_in_stale >= n_min:
+                                    carry_updates: dict = {
+                                        "Occurrence # this Period (Recurring Task)": {"number": 1},
+                                        "First Due Date": {"date": None},
+                                        "Due Date Update Count": {"number": 0},
+                                    }
+                                    new_due = _calc_due_date(cadence_type, period, anchor_day, anchor_time, use_next_period=False, task_type=task_type, def_id=def_id, cadence_n=cadence_n)
+                                    if new_due:
+                                        carry_updates["Due Date"] = new_due
+                                    if current_period_key:
+                                        carry_updates["Period Key (Recurring Task)"] = {"rich_text": [{"type": "text", "text": {"content": current_period_key}}]}
+                                    try:
+                                        client.update_page_properties(task["id"], _filter_optional(carry_updates))
+                                        carried_over_ids.add(task["id"])
+                                        logger.info(
+                                            f"Carrying forward task '{task_name}' ({task['id']}) for '{def_name}': "
+                                            f"minimum met ({completions_in_stale}/{n_min})."
+                                        )
+                                    except Exception as e:
+                                        logger.error(f"Failed to carry forward task {task['id']}: {e}")
+                                    continue
+                            logger.info(f"Auto-cancelling task '{task_name}' ({task['id']}) for '{def_name}': {reason}.")
+                            # Set Closed Date to the last moment of the period the Due Date
+                            # falls in (e.g. April 30 23:59 for a Monthly task due in April),
+                            # but no later than yesterday at 23:59 — if the period hasn't ended
+                            # yet (today is still inside it), a future Closed Date would be wrong.
+                            yesterday_end = (now - timedelta(days=1)).replace(
+                                hour=23, minute=59, second=0, microsecond=0
                             )
-                            if completions_in_stale >= n_min:
-                                carry_updates: dict = {
-                                    "Occurrence # this Period (Recurring Task)": {"number": 1},
-                                    "First Due Date": {"date": None},
-                                    "Due Date Update Count": {"number": 0},
-                                }
-                                new_due = _calc_due_date(cadence_type, period, anchor_day, anchor_time, use_next_period=False, task_type=task_type, def_id=def_id, cadence_n=cadence_n)
-                                if new_due:
-                                    carry_updates["Due Date"] = new_due
-                                if current_period_key:
-                                    carry_updates["Period Key (Recurring Task)"] = {"rich_text": [{"type": "text", "text": {"content": current_period_key}}]}
-                                try:
-                                    client.update_page_properties(task["id"], _filter_optional(carry_updates))
-                                    carried_over_ids.add(task["id"])
-                                    logger.info(
-                                        f"Carrying forward task '{task_name}' ({task['id']}) for '{def_name}': "
-                                        f"minimum met ({completions_in_stale}/{n_min})."
-                                    )
-                                except Exception as e:
-                                    logger.error(f"Failed to carry forward task {task['id']}: {e}")
-                                continue
-                        logger.info(f"Auto-cancelling task '{task_name}' ({task['id']}) for '{def_name}': {reason}.")
-                        # Set Closed Date to the last moment of the period the Due Date
-                        # falls in (e.g. April 30 23:59 for a Monthly task due in April),
-                        # but no later than yesterday at 23:59 — if the period hasn't ended
-                        # yet (today is still inside it), a future Closed Date would be wrong.
-                        yesterday_end = (now - timedelta(days=1)).replace(
-                            hour=23, minute=59, second=0, microsecond=0
-                        )
-                        close_date = min(_period_end(period, due), yesterday_end).isoformat()
-                        cancel_updates = {"Status": {"status": {"name": "Cancelled"}}}
-                        cancel_updates["Closed Date"] = {"date": {"start": close_date}}
-                        try:
-                            updated = client.update_page_properties(task["id"], cancel_updates)
-                            cancelled_ids.add(task["id"])
-                            cancelled_tasks.append(updated)  # post-cancel state: Status=Cancelled, Closed Date set
-                        except Exception as e:
-                            logger.error(f"Failed to cancel overdue task {task['id']}: {e}")
+                            close_date = min(_period_end(period, due), yesterday_end).isoformat()
+                            cancel_updates = {"Status": {"status": {"name": "Cancelled"}}}
+                            cancel_updates["Closed Date"] = {"date": {"start": close_date}}
+                            try:
+                                updated = client.update_page_properties(task["id"], cancel_updates)
+                                cancelled_ids.add(task["id"])
+                                cancelled_tasks.append(updated)
+                            except Exception as e:
+                                logger.error(f"Failed to cancel overdue task {task['id']}: {e}")
 
         # --- Habit: roll open tasks from a previous period forward to the current period ---
         # Also bootstraps existing Habit tasks that pre-date the Due Date feature (no Due Date set).

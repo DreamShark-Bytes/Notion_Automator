@@ -28,7 +28,7 @@ from bot_notes import clear_bot_notes, flush_bot_notes
 import recurring_tasks
 from recurring_tasks import BOT_CREATED_PAGES_KEY
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 NOTION_API_MIN_VERSION = "1.1.0"
 
 parser = argparse.ArgumentParser(description="Notion automation daemon")
@@ -54,7 +54,7 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
-from logging.handlers import RotatingFileHandler
+from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 
 _log_level = logging.DEBUG if args.debug else logging.INFO
 _log_fmt = logging.Formatter("%(asctime)s - %(levelname)s - [%(funcName)s] - %(message)s")
@@ -71,9 +71,13 @@ _rotating_handler = RotatingFileHandler(
 _rotating_handler.setLevel(_log_level)
 _rotating_handler.setFormatter(_log_fmt)
 
-# 48-hour debug window — separate file, not rotating.
+# 48-hour debug window: rotates at midnight, keeps 1 backup (current + yesterday).
 # notion_api logger stays at INFO (its DEBUG output is massive JSON response bodies).
-_debug_handler = logging.FileHandler("notion_daemon_debug.log", mode="a")
+_debug_handler = TimedRotatingFileHandler(
+    "notion_daemon_debug.log",
+    when="midnight",
+    backupCount=1,
+)
 _debug_handler.setLevel(logging.DEBUG)
 _debug_handler.setFormatter(_log_fmt)
 

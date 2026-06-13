@@ -665,7 +665,7 @@ Notion's API supports templates via `GET /v1/data_sources/{db_id}/templates` (li
 Maintaining a realistic-looking demo database by hand takes days and the data goes stale. A script that rebuilds it on demand with relative dates solves both problems.
 
 ### Decisions made so far
-- **Scope covers 3 databases:** Tasks (RTD-managed), Areas, Pursuits. Areas and Pursuits have 4–5 entries each — enough to make tasks feel grounded without cluttering the demo.
+- **Scope covers 3 databases:** Tasks, RTD, Areas, Pursuits. Areas and Pursuits have 4–5 entries each — enough to make tasks feel grounded without cluttering the demo.
 - **No Notion views in v1** — schema and pages only.
 - **Requires `create_database()` in Notion_API** — makes the script self-contained (schema + content in one run). This is the primary motivation for building `create_database()`, which also unblocks Automation Hub.
 - **`week_start` sourced from `config.toml`** — already present; no new config entry needed.

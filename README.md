@@ -276,7 +276,7 @@ Create a new database in Notion with these fields:
 | Period              | Select    | `Day`, `Week`, `Month`, `Year`                                                                         |
 | Anchor Day          | Number    | Mon=1 … Sun=7 for weekly; 1–31 for monthly (overflows to last day of month)                            |
 | Anchor Time         | Text      | e.g. `13:00`; blank = no specific time                                                                 |
-| Grace Period (days) | Number    | Responsibilities only — auto-cancelled this many days past due; blank = never                          |
+| Grace Period (days) | Number    | Responsibilities only — auto-cancelled this many days past due; blank = 1-day default; set 0 to cancel immediately after anchor time |
 | Current Period      | Date      | Optional — bot writes the current period's start and end datetimes each governance pass; enables Notion formulas that filter tasks to the current period |
 | Notes               | Rich Text |                                                                                                        |
 | Last Completed      | Rollup    | Max of `Closed Date` from related tasks                                                                |
@@ -494,7 +494,7 @@ if(
 1. Stop the service: `sudo systemctl stop notion-daemon`
 2. Back up any files you've edited: `automations.py` and `config.toml` are the only ones you're expected to modify
 3. Pull the latest changes: `git pull`
-4. Install any new dependencies: `venv/bin/pip install -r requirements.txt`
+4. Install any new dependencies: `venv/bin/pip install -r requirements.txt --force-reinstall`
    - This also updates [Notion_API](https://github.com/DreamShark-Bytes/Notion_API) if the pinned version changed. The release notes will call this out explicitly when it applies.
 5. Apply any Notion-side changes listed in the release notes (field renames, new select options, new columns)
 6. Update `config.toml` to match any new config format changes
@@ -508,7 +508,7 @@ To diff your local `automations.py` against the new version before overwriting: 
 1. Stop the service: `Stop-Service NotionAutomator`
 2. Back up any files you've edited: `automations.py` and `config.toml` are the only ones you're expected to modify
 3. Pull the latest changes: `git pull`
-4. Install any new dependencies: `venv\Scripts\pip install -r requirements.txt`
+4. Install any new dependencies: `venv\Scripts\pip install -r requirements.txt --force-reinstall`
    - This also updates [Notion_API](https://github.com/DreamShark-Bytes/Notion_API) if the pinned version changed. The release notes will call this out explicitly when it applies.
 5. Apply any Notion-side changes listed in the release notes (field renames, new select options, new columns)
 6. Update `config.toml` to match any new config format changes
