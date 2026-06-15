@@ -1,6 +1,8 @@
 # Scratch / temporary output
 scratch.md
 STATUS.md
+docs/
+wiki-drafts/
 
 # Secrets
 config.toml

@@ -4,6 +4,8 @@ A self-hosted automation daemon that extends Notion with custom logic — runnin
 
 Notion's built-in automations are powerful but gated behind paid plans and limited to predefined actions. This daemon lets you write your own automation rules in Python and react to any change in your Notion databases within a configurable poll interval. Runs on any Linux system with systemd (Raspberry Pi, Ubuntu, Debian, etc.).
 
+![Notion task database showing the Main Task Table with multiple view tabs — By Due Date, All Tasks, Open Recurring Tasks, Shopping List, All Recurring Tasks — and tasks organized chronologically with Due Date, Area, Pursuit, and Status fields.](assets/TouchedUp_MainTaskDatabase.png)
+
 ## Features
 
 - **[Closed Date Stamping](#closed-date-stamping)** — automatically stamps a Closed Date when a task is marked done, and clears it on reopen.
@@ -266,20 +268,20 @@ Keeps one open task per series at all times. When a task is marked Done or Cance
 
 Create a new database in Notion with these fields:
 
-| Field               | Type      | Notes                                                                                                  |
-| ---------------------| -----------| --------------------------------------------------------------------------------------------------------|
-| Name                | Title     |                                                                                                        |
-| Type                | Select    | `Habit`, `Bad Habit`, `Responsibility`                                                                 |
-| Status              | Status    | Bot only creates tasks when Status = `Active`                                                          |
-| Cadence Type        | Select    | `Once per period`, `Exactly N per period`, `Maximum N per period`, `Minimum N per period`, `Unlimited` |
-| N Cadence           | Number    | Used by cadence types that reference N; blank for others                                               |
-| Period              | Select    | `Day`, `Week`, `Month`, `Year`                                                                         |
-| Anchor Day          | Number    | Mon=1 … Sun=7 for weekly; 1–31 for monthly (overflows to last day of month)                            |
-| Anchor Time         | Text      | e.g. `13:00`; blank = no specific time                                                                 |
-| Grace Period (days) | Number    | Responsibilities only — auto-cancelled this many days past due; blank = 1-day default; set 0 to cancel immediately after anchor time |
+| Field               | Type      | Notes                                                                                                                                                    |
+| ---------------------| -----------| ----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Name                | Title     |                                                                                                                                                          |
+| Type                | Select    | `Habit`, `Bad Habit`, `Responsibility`                                                                                                                   |
+| Status              | Status    | Bot only creates tasks when Status = `Active`                                                                                                            |
+| Cadence Type        | Select    | `Once per period`, `Exactly N per period`, `Maximum N per period`, `Minimum N per period`, `Unlimited`                                                   |
+| N Cadence           | Number    | Used by cadence types that reference N; blank for others                                                                                                 |
+| Period              | Select    | `Day`, `Week`, `Month`, `Year`                                                                                                                           |
+| Anchor Day          | Number    | Mon=1 … Sun=7 for weekly; 1–31 for monthly (overflows to last day of month)                                                                              |
+| Anchor Time         | Text      | e.g. `13:00`; blank = no specific time                                                                                                                   |
+| Grace Period (days) | Number    | Responsibilities only — auto-cancelled this many days past due; blank = 1-day default; set 0 to cancel immediately after anchor time                     |
 | Current Period      | Date      | Optional — bot writes the current period's start and end datetimes each governance pass; enables Notion formulas that filter tasks to the current period |
-| Notes               | Rich Text |                                                                                                        |
-| Last Completed      | Rollup    | Max of `Closed Date` from related tasks                                                                |
+| Notes               | Rich Text |                                                                                                                                                          |
+| Last Completed      | Rollup    | Max of `Closed Date` from related tasks                                                                                                                  |
 
 ### Notion setup — Task database
 
@@ -328,6 +330,8 @@ tasks_db_id       = "your-tasks-database-id"
 - **Startup governance**: on every daemon start, the bot checks that each Active series has exactly one open task for the current period. Zero → creates one. Multiple → logs a warning for manual resolution.
 - **Live monitoring**: the definitions database is polled alongside your task databases. Creating a new definition or toggling one to `Active` triggers governance within one poll cycle — no restart needed.
 - **Deleted tasks** are handled by governance — if a recurring task is deleted, the startup check detects the missing open task and creates a replacement.
+
+![Recurring Task Definitions database showing example series including a daily morning routine, weekly physical therapy, and screen time limit, each configured with Type (Habit, Responsibility, or Bad Habit), Cadence Type, Period, and Anchor Time.](assets/TouchedUp_RecurringTaskDefinitions2.png)
 
 ---
 
@@ -390,73 +394,6 @@ The system supports one Anchor Day per series definition. To track a recurring a
 **Applying RTD config changes immediately:**
 Changing an RTD's `Period`, `Cadence Type`, or `N Cadence` doesn't trigger governance right away — the change takes effect at the next daemon startup or daily governance cron. To apply it immediately without waiting: set the RTD's Status to inactive, wait one poll cycle (default 60s), then set it back to Active. The Status → Active transition triggers an immediate governance run that drift-corrects all affected tasks. A one-click Force Governance option is planned as part of the Automation Hub.
 
-**Visual status indicator (formula field):**
-Add a formula field to your task database to see task state at a glance. The formula below concatenates emoji based on task properties — useful as a first column in your board or list view.
-
-Emoji key: ⏰ past due · 🧱 actively blocking an open task · 🛑 blocked by an open task · 🔁 recurring task · 🌿 has parent task · 🌳 has child tasks · 🤖 has bot note
-
-```
-if(
-    and(
-        prop("Status") != "Done",
-        prop("Status") != "Cancelled"
-        ),
-        if(
-            not empty(prop("Due Date")),
-            if(
-                or(
-                    and( test(format(prop("Due Date")), "AM|PM"),prop("Due Date")<now()),
-                    and( not test(format(prop("Due Date")), "AM|PM"),dateAdd(prop("Due Date"),1,"days") < now() )
-            ),
-            "⏰",
-          ""
-        ),
-        ""
-  ),
-  ""
-) + if(and(
-            not empty(prop("Blocking")),
-            prop("is Open")==true
-            ),
-            if(prop("Blocking").map(current.prop("is Open") == true).includes(true),
-                "🧱",
-                ""
-            ),
-    ""
-) + if(and(
-            not empty(prop("Blocked by")),
-            prop("is Open") == true
-            ),
-            if(prop("Blocked by").map(current.prop("is Open") == true).includes(true),
-                "🛑",
-                ""
-            ),
-    ""
-) + if(not empty(prop("Recurring Series")),
-    "🔁",
-    ""
-) + if(not empty(prop("Parent Task")),
-    "🌿",
-    ""
-) + if(not empty(prop("Child Task")),
-    "🌳",
-    ""
-) + if(not empty(prop("Bot Notes")),
-    "🤖",
-    ""
-)
-```
-
-Field names must match your database exactly. The `🧱` and `🛑` indicators depend on an `is Open` formula field (boolean) in your task database:
-
-```
-includes(["Not started", "Todo", "On hold", "In progress"], prop("Status"))
-```
-
-List only your open states here — the field name `is Open` should reflect that: it returns true only for tasks that are still in progress. Update the status option names to match your database. The overdue check handles both date-only and date+time fields: date+time compares directly to `now()`; date-only adds one day since a date with no time represents the whole day.
-
-Note: Notion evaluates all branches of `and()`/`or()` — there is no short-circuit evaluation. Design formulas accordingly.
-
 **`Current Period` field — filtering tasks to the current period in Notion:**
 Add a `Current Period` Date field to your definitions database. Governance writes the current period's start and end datetimes to it on every governance pass. You can then use a Notion formula on your task pages to check whether a task's Due Date falls within the current period:
 
@@ -467,25 +404,6 @@ prop("Recurring Series").map(current.prop("Current Period")).map(
 ```
 
 Pair this with a rollup on the definitions database to count tasks completed this period — more accurate than a bot-maintained counter and requires no extra writes.
-
-**Due Date sort helper (formula field):**
-Add a formula field to your task database to sort tasks by Due Date in a way that keeps active tasks at the top. Helps sort tasks by Due Date: if a date range is active now, returns `now()` so the task sorts as a "today" task; if the range has ended, returns the end date; if Due Date is empty, returns a far-future date so the task sorts to the bottom.
-
-```
-if(
-  empty(prop("Due Date")),
-  parseDate("2999-01-01T00:01Z"),
-  if(
-    now() >= dateStart(prop("Due Date")) and now() <= dateEnd(prop("Due Date")),
-    now(),
-    if(
-      now() > dateEnd(prop("Due Date")),
-      dateEnd(prop("Due Date")),
-      dateStart(prop("Due Date"))
-    )
-  )
-)
-```
 
 ---
 

@@ -24,7 +24,6 @@ Living design document. Sections are deleted when a feature is implemented and i
 - [Companion: Siri Shortcuts Integration](#companion-siri-shortcuts-integration)
 - [Range Cadence (At Least N, At Most M)](#range-cadence-at-least-n-at-most-m)
 - [Task Templates](#task-templates)
-- [Demo Setup Script](#demo-setup-script)
 
 ---
 
@@ -453,6 +452,33 @@ These answer different questions. First Value = "what was this when first observ
 
 ---
 
+## Improvement: Cumulative Overdue Time Tracking
+
+**Status:** Pre-design
+**One-liner:** Bot accumulates the number of governance passes a task has spent overdue into a number field; a Notion formula combines it with Due Date Change Counter for a per-task volatility score.
+
+### Motivation
+Due Date Change Counter alone doesn't catch the "let it stay overdue forever" pattern — a task that never gets rescheduled accumulates no change count. The overdue accumulator closes that gap: every daily governance pass where the task is open and past-due increments the counter, regardless of whether the user has touched it.
+
+### Design
+- New bot-managed field on the task database: `Overdue Days` (Number)
+- During each governance pass: if task is open AND Due Date end < now, increment `Overdue Days` by 1
+- Does NOT reset on task close — the final value is a permanent record of how long it was overdue before resolution
+- For recurring tasks: each new task instance is a new Notion page, so the counter naturally starts at 0 per period; no explicit reset needed
+- Volatility formula (user-defined in Notion, not bot-managed):
+  `Due Date Change Counter * weightA + Overdue Days * weightB`
+  Thresholds for High/Medium/Low are user's choice — not hardcoded by the bot
+
+### What the bot does NOT do
+- Does not write a "Volatility" field — that's a formula the user controls
+- Does not reset the counter at any point after task creation
+
+### Dependencies
+- None — can implement independently of Field Update Count and First Value tracking
+- Governance pass already iterates all open tasks; this adds one conditional increment per task
+
+---
+
 ## Improvement: RTD Current Period Field
 
 **Status:** Pre-design
@@ -653,85 +679,3 @@ Notion's API supports templates via `GET /v1/data_sources/{db_id}/templates` (li
 
 ### Dependencies
 - `notion_api.py`: add `list_templates()` and update `create_page()` to accept an optional `template_id` param
-
----
-
-## Demo Setup Script
-
-**Status:** Pre-design
-**One-liner:** A script + definition file that programmatically creates and populates a demo Notion environment so screenshots are always current.
-
-### Motivation
-Maintaining a realistic-looking demo database by hand takes days and the data goes stale. A script that rebuilds it on demand with relative dates solves both problems.
-
-### Decisions made so far
-- **Scope covers 3 databases:** Tasks, RTD, Areas, Pursuits. Areas and Pursuits have 4–5 entries each — enough to make tasks feel grounded without cluttering the demo.
-- **No Notion views in v1** — schema and pages only.
-- **Requires `create_database()` in Notion_API** — makes the script self-contained (schema + content in one run). This is the primary motivation for building `create_database()`, which also unblocks Automation Hub.
-- **`week_start` sourced from `config.toml`** — already present; no new config entry needed.
-- **Timezone:** `datetime.now().astimezone()` — local time, no Notion API call needed.
-- **`created_time` is read-only in Notion's API** — workaround: populate a user-defined "Created Time (Manual)" date field instead. BI tools (Power BI) read this field first and fall back to Notion's `created_time`.
-- **Comments:** supported via a new `create_comment()` in Notion_API. 2–3 comments on select tasks to add realism.
-- **Icons:** already supported in `create_page(icon=...)`. Set on all demo pages.
-- **Shareable Notion template** (separate from this script) — worth considering as a complement: a "duplicate this" link lets users explore the database themselves without screenshots. Not a replacement for the script.
-
-### Date expression format
-Expressions are strings evaluated at script runtime. Order of operations: week anchor → day offset → time.
-
-```
-"now"                        → datetime.now() (local)
-"-3d"                        → 3 days ago, same time
-"+1d 09:00"                  → tomorrow at 9am local
-"prev_monday"                → last Monday at midnight
-"prev_tuesday 09:00"         → last Tuesday at 9am
-"this_week_start"            → Monday (or Sunday per week_start) of current week
-"prev_week_start"            → Monday/Sunday of last week
-"prev_week_start +2d 14:00"  → 2 days into last week at 2pm
-```
-`prev_weekday` = the most recent occurrence of that weekday before today (never today).
-`this_week_start` respects `week_start` from `config.toml`.
-Month/year-level expressions deferred until needed.
-
-### demo_data.toml shape (rough)
-```toml
-[config]
-api_token_env = "NOTION_TOKEN"   # env var name to read token from
-parent_page_id = "abc123..."     # Notion page under which databases are created
-week_start = "Monday"            # optional override; default: read from config.toml
-
-[[databases]]
-key = "areas"
-name = "Areas"
-icon = "🗺️"
-
-  [[databases.areas.pages]]
-  name = "Vitality"
-  icon = "💪"
-
-[[databases]]
-key = "tasks"
-name = "Tasks"
-icon = "✅"
-
-  [[databases.tasks.pages]]
-  name = "Call dentist"
-  status = "Done"
-  due_date = "prev_monday 09:00"
-  close_date = "prev_monday +1d 11:30"
-  occurrence = 5
-  area = "vitality"        # references databases.areas page by name
-  icon = "📞"
-
-    [[databases.tasks.pages.comments]]
-    text = "Rescheduled — they had an opening earlier."
-```
-
-### Open questions
-- Does `create_database()` accept property type definitions as a dict, or should it take a typed schema object? (Affects Notion_API design, not just the demo.)
-- Re-run behavior: archive existing demo pages and recreate, or delete the whole database and recreate? Archive is safer (avoids accidental deletion of non-demo content if run against a wrong database).
-- Should the script accept a `--dry-run` flag that prints what it would create without calling the API?
-
-### Dependencies
-- `create_database()` in Notion_API (not yet built)
-- `create_comment()` in Notion_API (not yet built)
-

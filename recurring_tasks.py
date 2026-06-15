@@ -1209,6 +1209,18 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
             # If this period's task was auto-cancelled, use it as the inheritance source.
             # Pick the cancelled task with the most recent Due Date as the reference.
             ref_task = max(cancelled_tasks, key=lambda t: _get_due_end_or_start(t) or now) if cancelled_tasks else None
+            # If no auto-cancelled task is available (e.g. the task was closed Done before
+            # governance ran), fall back to the most recently completed task so field
+            # inheritance still occurs — consistent with the live-poll completion path.
+            if ref_task is None:
+                done_tasks = [
+                    t for t in all_tasks
+                    if def_id in _get_relation_ids(t, "Recurring Series")
+                    and not _is_open(t)
+                    and _normalize_status(_get_status(t, "Status")) not in NON_COMPLETION_STATUSES
+                ]
+                if done_tasks:
+                    ref_task = max(done_tasks, key=lambda t: _get_due_end_or_start(t) or now)
             new_page = _create_next_task(client, ref_task, definition, force_next_period=force_next)
             if new_page:
                 created_pages.append(new_page)
