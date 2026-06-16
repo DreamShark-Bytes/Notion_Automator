@@ -901,13 +901,13 @@ def _create_next_task(
         """Call create_page with icon, degrading gracefully if Notion_API is pre-v1.1.2."""
         if rtd_icon:
             try:
-                return client.create_page(db_id, page_props, icon=rtd_icon)
+                return client.create_page(db_id, page_props, icon=rtd_icon, template={"type": "default"})
             except TypeError:
                 logger.warning(
                     f"Notion_API does not support the 'icon' parameter — upgrade to v1.1.2+. "
                     f"Task created without icon for '{def_name}'."
                 )
-        return client.create_page(db_id, page_props)
+        return client.create_page(db_id, page_props, template={"type": "default"})
 
     try:
         new_page = _do_create(_filter_optional(props))
