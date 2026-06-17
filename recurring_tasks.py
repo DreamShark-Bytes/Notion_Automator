@@ -88,6 +88,18 @@ def init(definitions_db_id: str, tasks_db_id: str, week_start_day: int = 0, day_
     _day_start_hour = day_start_hour
 
 
+def configure_non_completion_statuses(statuses: list[str]) -> None:
+    """Set the global non-completion status list from config.toml.
+
+    Called once at daemon startup. Statuses are normalized the same way as
+    _normalize_status() so the lookup is case-insensitive and punctuation-insensitive.
+    """
+    global _configured_non_completion_statuses
+    _configured_non_completion_statuses = frozenset(
+        re.sub(r'[^a-z]', '', s.lower()) for s in statuses
+    )
+
+
 def _load_task_db_schema(client: "NotionClient") -> None:
     """Query the task database schema once and cache the property names.
 
@@ -144,11 +156,15 @@ RTD_ACTIVE_STATUS = "Active"
 # Compared after lowercasing and stripping all non-letter characters, so
 # "Cancelled", "cancelled", "canceled", and "Canceled" all match "cancelled"/"canceled".
 NON_COMPLETION_STATUSES: frozenset[str] = frozenset({
-    "cancelled", "canceled", 
+    "cancelled", "canceled",
     "skipped", "missed",
     "ignored", "abandoned",
-    "destroyed", "disintegrated", "vaporized", "yeeted", "evaporated","banished"
+    "destroyed", "disintegrated", "vaporized", "yeeted", "evaporated", "banished", "purchased", "bought"
 })
+
+# Configured non-completion statuses, set once at daemon startup from config.toml.
+# None means "not configured" — falls back to NON_COMPLETION_STATUSES.
+_configured_non_completion_statuses: frozenset[str] | None = None
 
 # Property types that are read-only and cannot be set via the API.
 # "files" is included because Notion does not support setting file attachments
@@ -549,6 +565,19 @@ def _normalize_status(s: str | None) -> str:
     return re.sub(r'[^a-z]', '', s.lower())
 
 
+def _is_non_completion(status: str | None) -> bool:
+    """Return True if the status represents a non-completion (cancelled, skipped, etc.).
+
+    Uses the list from configure_non_completion_statuses() when set, falling back
+    to the hardcoded NON_COMPLETION_STATUSES frozenset for installs that have not
+    added non_completion_statuses to config.toml.
+    """
+    normalized = _normalize_status(status)
+    if _configured_non_completion_statuses is not None:
+        return normalized in _configured_non_completion_statuses
+    return normalized in NON_COMPLETION_STATUSES
+
+
 def _is_open(task: dict) -> bool:
     """Return True if a task has no Closed Date and is not a non-completion status.
 
@@ -559,7 +588,7 @@ def _is_open(task: dict) -> bool:
     distinguish truly-open from just-completed should use _get_status_group
     instead (requires a client call to look up the status group schema).
     """
-    if _normalize_status(_get_status(task, "Status")) in NON_COMPLETION_STATUSES:
+    if _is_non_completion(_get_status(task, "Status")):
         return False
     return _get_date(task, "Closed Date") is None
 
@@ -587,7 +616,7 @@ def _task_in_period(
         return False
     # Non-completion statuses (cancelled, skipped, missed, etc.) do not count —
     # they represent missed/skipped attempts, not completions.
-    if _normalize_status(_get_status(task, "Status")) in NON_COMPLETION_STATUSES:
+    if _is_non_completion(_get_status(task, "Status")):
         return False
     closed_date_str = _get_date(task, "Closed Date")
     if closed_date_str:
@@ -792,6 +821,8 @@ def _create_next_task(
             current_completions = sum(
                 1 for t in fetched_tasks
                 if _task_in_period(t, period, current_period_key)
+                and not _is_open(t)
+                and not _is_non_completion(_get_status(t, "Status"))
             )
             use_next_period = current_completions >= n_threshold
         else:
@@ -847,7 +878,7 @@ def _create_next_task(
         for t in fetched_tasks:
             if _get_status_group(client, t, "Status") == "Complete":
                 continue  # completed — not a duplicate
-            if _normalize_status(_get_status(t, "Status")) in NON_COMPLETION_STATUSES:
+            if _is_non_completion(_get_status(t, "Status")):
                 continue  # cancelled/skipped — not a duplicate
             due_dt = _get_due_end_or_start(t)
             if due_dt and period:
@@ -1002,7 +1033,7 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
             continue
         if _get_status_group(client, task, "Status") == "Complete":
             continue
-        if _normalize_status(_get_status(task, "Status")) in NON_COMPLETION_STATUSES:
+        if _is_non_completion(_get_status(task, "Status")):
             continue
         open_tasks_by_def.setdefault(series[0], []).append(task)
 
@@ -1223,7 +1254,7 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
                     t for t in all_tasks
                     if def_id in _get_relation_ids(t, "Recurring Series")
                     and not _is_open(t)
-                    and _normalize_status(_get_status(t, "Status")) not in NON_COMPLETION_STATUSES
+                    and not _is_non_completion(_get_status(t, "Status"))
                 ]
                 if done_tasks:
                     ref_task = max(done_tasks, key=lambda t: _get_due_end_or_start(t) or now)
@@ -1269,7 +1300,7 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
                     due_dt = _get_due_end_or_start(t)
                     return (0, due_dt.isoformat()) if due_dt else (1, "")
 
-                is_cancelled_fn = lambda t: _normalize_status(_get_status(t, "Status")) in NON_COMPLETION_STATUSES
+                is_cancelled_fn = lambda t: _is_non_completion(_get_status(t, "Status"))
                 ordered = sorted(group_tasks, key=_occ_sort_key)
                 current_occurrence = 1
 
@@ -1342,7 +1373,7 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
 
             is_cancelled_fn = lambda t: (
                 t["id"] in cancelled_ids
-                or _normalize_status(_get_status(t, "Status")) in NON_COMPLETION_STATUSES
+                or _is_non_completion(_get_status(t, "Status"))
             )
 
             for group_pk, group_tasks in tasks_by_period.items():
@@ -1477,7 +1508,7 @@ def auto_recurring_tasks(client: "NotionClient", page: dict, prev_page: dict | N
     # guard in _create_next_task prevents double-creation when governance already
     # created a replacement in the same pass (e.g. auto-cancel of an overdue task).
     if prev_page is not None and current_group == "Complete" and prev_group != "Complete":
-        action = "cancelled" if _normalize_status(_get_status(page, "Status")) in NON_COMPLETION_STATUSES else "completed"
+        action = "cancelled" if _is_non_completion(_get_status(page, "Status")) else "completed"
         logger.info(f"Recurring task {page['id']} {action} — creating next task.")
         new_page = _create_next_task(client, page, definition)
         created = [new_page] if new_page is not None else []

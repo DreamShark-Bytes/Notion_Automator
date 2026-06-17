@@ -19,6 +19,9 @@ from recurring_tasks import (
     _get_prop,
     _get_date,
     _get_number,
+    _get_select,
+    _get_status,
+    _get_text,
     _get_status_group,
     _now_iso,
     _now_local_iso,
@@ -37,7 +40,11 @@ if TYPE_CHECKING:
 #  Per-database automation config registry
 # ------------------------------------------------------------------ #
 
-_db_configs: dict[str, dict] = {}  # database_id → [[databases]] config entry
+_db_configs: dict[str, dict] = {}  # database_id -> [[databases]] config entry
+
+# Tracks databases for which a due_date_tracking deprecation warning has fired,
+# so the warning appears once per database rather than on every page.
+_deprecation_warned: set[str] = set()
 
 
 def register_db(db_id: str, cfg: dict) -> None:
@@ -51,6 +58,110 @@ def _flags(page: dict) -> dict:
     return _db_configs.get(db_id, {})
 
 
+def _db_id_of(page: dict) -> str:
+    return page.get("parent", {}).get("database_id", "")
+
+
+# ------------------------------------------------------------------ #
+#  Per-database Notion schema cache
+# ------------------------------------------------------------------ #
+
+_db_schema_cache: dict[str, dict[str, str]] = {}  # db_id -> {field_name -> field_type}
+
+
+def _get_db_schema(client: "NotionClient", db_id: str) -> dict[str, str]:
+    """Return {field_name: field_type} for the given database. Cached per daemon run."""
+    key = db_id.replace("-", "")
+    if key not in _db_schema_cache:
+        try:
+            db = client.get_database(db_id)
+            _db_schema_cache[key] = {
+                name: prop.get("type", "unknown")
+                for name, prop in db.get("properties", {}).items()
+            }
+            logger.debug(f"Loaded schema for database {db_id}: {len(_db_schema_cache[key])} fields.")
+        except Exception as e:
+            logger.warning(f"Could not load schema for database {db_id}: {e}")
+            _db_schema_cache[key] = {}
+    return _db_schema_cache[key]
+
+
+# ------------------------------------------------------------------ #
+#  Field value helpers for generic tracking
+# ------------------------------------------------------------------ #
+
+def _read_canonical(page: dict, field_name: str, field_type: str) -> str | None:
+    """Read a field value as a comparable string. Returns None if the field is empty."""
+    if field_type == "date":
+        val = _get_date(page, field_name)
+        return val[:10] if val else None
+    if field_type == "select":
+        return _get_select(page, field_name)
+    if field_type == "status":
+        return _get_status(page, field_name)
+    if field_type == "number":
+        n = _get_number(page, field_name)
+        return str(n) if n is not None else None
+    if field_type in ("rich_text", "title", "text"):
+        return _get_text(page, field_name)
+    if field_type in ("url", "email", "phone_number"):
+        prop = _get_prop(page, field_name)
+        return (prop or {}).get(field_type) if prop else None
+    return None
+
+
+def _build_first_value_write(
+    source_page: dict,
+    field_name: str,
+    source_type: str,
+    target_type: str,
+) -> dict | None:
+    """
+    Build the Notion API property payload for writing a first-value snapshot.
+    The target field type determines the write format.
+    Returns None if the source field is empty.
+    """
+    if source_type == "date" and target_type == "date":
+        prop = _get_prop(source_page, field_name) or {}
+        date_obj = prop.get("date") or {}
+        filtered = {k: v for k, v in date_obj.items() if k in ("start", "end")}
+        return {"date": filtered} if filtered.get("start") else None
+
+    if target_type == "rich_text":
+        val = _read_canonical(source_page, field_name, source_type)
+        if not val:
+            return None
+        return {"rich_text": [{"type": "text", "text": {"content": val}}]}
+
+    if target_type == "number":
+        n = _get_number(source_page, field_name)
+        return {"number": n} if n is not None else None
+
+    return None
+
+
+def _resolve_tracking_fields(flags: dict, config_key: str, db_id: str) -> list[str]:
+    """
+    Return the list of field names to track for a given config key.
+    Handles the due_date_tracking -> first_value_fields/update_count_fields migration.
+    """
+    fields = flags.get(config_key)
+    if fields:
+        return fields
+
+    if flags.get("due_date_tracking"):
+        if db_id not in _deprecation_warned:
+            _deprecation_warned.add(db_id)
+            logger.warning(
+                f"Database {db_id}: 'due_date_tracking = true' is deprecated. "
+                f"Replace with 'first_value_fields = [\"Due Date\"]' and "
+                f"'update_count_fields = [\"Due Date\"]' in config.toml."
+            )
+        return ["Due Date"]
+
+    return []
+
+
 # ------------------------------------------------------------------ #
 #  Automation: manage "Closed Date" and "Reopen Count"
 # ------------------------------------------------------------------ #
@@ -59,19 +170,19 @@ def auto_closed_date(client: "NotionClient", page: dict, prev_page: dict | None)
     """
     Manages 'Closed Date' and 'Reopen Count' across close and reopen transitions.
 
-    On close (non-Complete → Complete):
+    On close (non-Complete -> Complete):
       - If 'Closed Date' is already set (pre-filled by user, either in this edit or
         a prior one): leave it for all task types. It feeds period counting and
         _create_next_task period key derivation.
       - Otherwise: stamp 'Closed Date' with now().
 
-    On reopen (Complete → non-Complete):
+    On reopen (Complete -> non-Complete):
       - Clear 'Closed Date' so the next close always stamps correctly.
       - Increment 'Reopen Count'.
 
     Governance:
-      - 'Reopen Count' missing → initialize to 0.
-      - Status is Complete but 'Closed Date' is empty → backfill with last_edited_time.
+      - 'Reopen Count' missing -> initialize to 0.
+      - Status is Complete but 'Closed Date' is empty -> backfill with last_edited_time.
     """
     flags = _flags(page)
     if not flags.get("closed_date"):
@@ -138,63 +249,124 @@ def auto_closed_date(client: "NotionClient", page: dict, prev_page: dict | None)
 
 
 # ------------------------------------------------------------------ #
-#  Automation: increment "Due Date Update Count" when Due Date changes
+#  Automation: stamp "First [Field]" on first observation
 # ------------------------------------------------------------------ #
 
-def auto_due_date_update_count(_client, page: dict, prev_page: dict | None) -> dict:
+def auto_first_value(client: "NotionClient", page: dict, prev_page: dict | None) -> dict:
     """
-    Increments 'Due Date Update Count' only when Due Date changes from one
-    date to another.
+    For each field listed in first_value_fields, stamps a 'First [Field Name]'
+    column with the field's first observed non-empty value. Never overwrites.
 
-    Governance (runs on every processed page):
-      - 'Due Date Update Count' missing → initialized to 0.
-      - 'First Due Date' missing but 'Due Date' set → stamped with current Due
-        Date value; does NOT count as a change.
+    Naming convention: the bot looks for a column named 'First [Field Name]'
+    in the database schema. Missing columns are skipped silently.
 
-    Does NOT increment when:
-      - Due Date is set for the first time (stamps 'First Due Date' instead)
-      - Due Date is cleared
-      - Due Date is unchanged
-      - Only the time component of Due Date changed (date must change to count)
+    Config (per [[databases]] entry):
+        first_value_fields = ["Due Date", "Status", "Priority"]
 
-    Disabled entirely if 'due_date_tracking' is not set for this database in config.toml.
+    Deprecated alias: due_date_tracking = true is treated as
+        first_value_fields = ["Due Date"]
+    with a one-time warning per database.
+
+    Supported source types: date, select, status, number,
+    rich_text/text, url, email, phone_number.
     """
-    if not _flags(page).get("due_date_tracking"):
+    flags = _flags(page)
+    db_id = _db_id_of(page)
+    fields = _resolve_tracking_fields(flags, "first_value_fields", db_id)
+    if not fields:
         return {}
-    DATE_FIELD       = "Due Date"
-    COUNTER_FIELD    = "Due Date Update Count"
-    FIRST_DATE_FIELD = "First Due Date"
 
-    current_due = _get_date(page, DATE_FIELD)
-    prev_due    = _get_date(prev_page, DATE_FIELD) if prev_page else None
-    first_due   = _get_date(page, FIRST_DATE_FIELD)
-    count       = _get_number(page, COUNTER_FIELD)
-    logger.info(f"Due date: {prev_due!r} → {current_due!r}, first_due={first_due!r}, count={count!r}")
-
+    schema = _get_db_schema(client, db_id)
     updates = {}
 
-    # Governance: initialize counter if missing
-    if count is None:
-        updates[COUNTER_FIELD] = {"number": 0}
-        count = 0
+    for field_name in fields:
+        target_name = f"First {field_name}"
+        if target_name not in schema:
+            continue
+        source_type = schema.get(field_name)
+        target_type = schema.get(target_name)
+        if not source_type or not target_type:
+            continue
 
-    # Governance: stamp First Due Date if Due Date is set but First Due Date isn't.
-    # Treat this as the initial set — do not increment the counter.
-    if not first_due and current_due:
-        logger.info(f"First due date seen — stamping '{FIRST_DATE_FIELD}': {current_due}")
-        due_prop = _get_prop(page, DATE_FIELD)
-        due_date_obj = (due_prop or {}).get("date", {})
-        updates[FIRST_DATE_FIELD] = {"date": {k: v for k, v in due_date_obj.items() if k in ("start", "end")}}
-        return updates
+        # Already stamped — never overwrite.
+        if _read_canonical(page, target_name, target_type) is not None:
+            continue
 
-    # Increment only when: page has due-date history, new value is a date, and the DATE changed.
-    # Time-only changes (e.g. 9am → 2pm on the same day) do not count.
-    # Guard against prev_page=None (first poll after startup) — no baseline means no change.
-    current_date_only = current_due[:10] if current_due else None
-    prev_date_only    = prev_due[:10] if prev_due else None
-    if prev_page is not None and first_due and current_date_only and current_date_only != prev_date_only:
-        logger.info(f"Due date changed {prev_due!r} → {current_due!r} — incrementing to {count + 1}")
-        updates[COUNTER_FIELD] = {"number": count + 1}
+        write = _build_first_value_write(page, field_name, source_type, target_type)
+        if write:
+            logger.info(f"First value seen for '{field_name}' — stamping '{target_name}'.")
+            updates[target_name] = write
+
+    return updates
+
+
+# ------------------------------------------------------------------ #
+#  Automation: increment "[Field] Update Count" on value change
+# ------------------------------------------------------------------ #
+
+def auto_update_count(client: "NotionClient", page: dict, prev_page: dict | None) -> dict:
+    """
+    For each field listed in update_count_fields, increments a
+    '[Field Name] Update Count' number column whenever the field value changes.
+
+    Naming convention: the bot looks for '[Field Name] Update Count' in the
+    schema. Missing columns are skipped silently.
+
+    Config (per [[databases]] entry):
+        update_count_fields = ["Due Date", "Status"]
+
+    Governance: initializes the counter to 0 if the field is null.
+
+    For date fields, only a change to the date portion counts. Time-only
+    changes (e.g. 9 am to 2 pm on the same day) are ignored.
+
+    Does not increment:
+      - On the first time a value is set (no previous snapshot to compare)
+      - When the field is cleared
+      - When the value is unchanged
+
+    Deprecated alias: due_date_tracking = true is treated as
+        update_count_fields = ["Due Date"]
+    with a one-time warning per database.
+    """
+    flags = _flags(page)
+    db_id = _db_id_of(page)
+    fields = _resolve_tracking_fields(flags, "update_count_fields", db_id)
+    if not fields:
+        return {}
+
+    schema = _get_db_schema(client, db_id)
+    updates = {}
+
+    for field_name in fields:
+        counter_name = f"{field_name} Update Count"
+        if counter_name not in schema:
+            continue
+
+        count = _get_number(page, counter_name)
+
+        # Governance: initialize counter if missing.
+        if count is None:
+            updates[counter_name] = {"number": 0}
+            continue
+
+        # No previous snapshot — skip incrementing on init pass.
+        if prev_page is None:
+            continue
+
+        source_type = schema.get(field_name)
+        if not source_type:
+            continue
+
+        current_val = _read_canonical(page, field_name, source_type)
+        prev_val    = _read_canonical(prev_page, field_name, source_type)
+
+        if current_val and prev_val and current_val != prev_val:
+            logger.info(
+                f"'{field_name}' changed {prev_val!r} -> {current_val!r} "
+                f"— incrementing '{counter_name}' to {int(count) + 1}."
+            )
+            updates[counter_name] = {"number": int(count) + 1}
 
     return updates
 
@@ -228,11 +400,12 @@ def auto_last_edited_note(_client, page: dict, prev_page: dict | None) -> dict:
 
 AUTOMATIONS = [
     auto_closed_date,
-    auto_due_date_update_count,
+    auto_first_value,
+    auto_update_count,
     # auto_recurring_tasks must remain last — it creates Notion pages and should
     # run after all field-stamping automations have settled their updates.
     auto_recurring_tasks,
-    # auto_last_edited_note,   # ← uncomment to enable
+    # auto_last_edited_note,   # <- uncomment to enable
 ]
 
 # Functions run at startup and on the 2am cron. Each receives only `client`.

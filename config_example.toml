@@ -18,13 +18,30 @@ day_start_hour = 3
 # Accepts any full day name: "Sunday", "Monday", … "Saturday".
 week_start = "Sunday"
 
+# Statuses that represent a failed or abandoned attempt rather than a true completion.
+# The bot uses this list to decide whether a closed recurring task should trigger
+# creation of the next one (non-completion = retry; completion = advance).
+# Case-insensitive. If absent, falls back to a built-in list covering common
+# variations of "cancelled", "skipped", etc.
+non_completion_statuses = ["Cancelled", "Skipped", "Missed", "Ignored", "Abandoned", "Purchased", "Bought"]
+
 # Task databases to watch. Each [[databases]] block is one database.
 # Flags control which automations are active for that database (absent = disabled).
 [[databases]]
-id                = "your-database-id-here"
-closed_date       = true   # stamp Closed Date on close; clear on reopen (required for recurring tasks)
-reopen_count      = true   # increment Reopen Count on reopen (requires closed_date = true to be useful)
-due_date_tracking = true   # track Due Date Update Count and First Due Date
+id                  = "your-database-id-here"
+closed_date         = true   # stamp Closed Date on close; clear on reopen (required for recurring tasks)
+reopen_count        = true   # increment Reopen Count on reopen (requires closed_date = true to be useful)
+
+# For each field listed here the bot stamps a "First [Field Name]" column with
+# the field's first observed non-empty value. The target column must exist in
+# the database with that exact name. Supported types: date, select, status,
+# number, rich_text, url, email, phone_number.
+first_value_fields  = ["Due Date"]
+
+# For each field listed here the bot increments a "[Field Name] Update Count"
+# number column each time the value changes. Date fields count only date-portion
+# changes; time-only changes are ignored.
+update_count_fields = ["Due Date"]
 
 # Add more [[databases]] blocks for additional task databases.
 

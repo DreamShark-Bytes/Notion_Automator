@@ -13,23 +13,7 @@ Covered cases:
 import pytest
 from unittest.mock import MagicMock
 import recurring_tasks
-
-
-def make_definition(type_value):
-    """Minimal Notion RTD dict with just the fields the Type guard reads."""
-    select_prop = {"name": type_value} if type_value else None
-    return {
-        "id": "test-def-id",
-        "properties": {
-            "Name":        {"type": "title",      "title": [{"plain_text": "Test RTD"}]},
-            "Type":        {"type": "select",     "select": select_prop},
-            "Cadence Type":{"type": "select",     "select": None},
-            "Period":      {"type": "select",     "select": None},
-            "Anchor Day":  {"type": "number",     "number": None},
-            "Anchor Time": {"type": "rich_text",  "rich_text": []},
-            "N Cadence":   {"type": "number",     "number": None},
-        },
-    }
+from helpers import make_definition
 
 
 @pytest.mark.parametrize("type_value", [

@@ -241,8 +241,8 @@ The key pattern: during the startup governance pass, `prev_page=page` is passed 
 
 | Field | Rule |
 |---|---|
-| `Due Date Update Count` | If `None`, initialize to `0` |
-| `First Due Date` | If empty and `Due Date` is set, stamp with current `Due Date` value. Does not increment the counter. |
+| `[Field] Update Count` | If `None`, initialize to `0` for each field listed in `update_count_fields` |
+| `First [Field]` | If empty and the source field is set, stamp with the current value. Does not increment the counter. Applies to each field in `first_value_fields`. |
 | `Closed Date` | If status is in the `Complete` group and `Closed Date` is empty, backfill with `last_edited_time` |
 | `Reopen Count` | If `None`, initialize to `0` |
 
@@ -278,30 +278,47 @@ The key pattern: during the startup governance pass, `prev_page=page` is passed 
 
 ---
 
-### 6.2 `auto_due_date_update_count`
+### 6.2 `auto_first_value`
 
-**Trigger:** `Due Date` changes from one date to a different date.
+**Trigger:** A field listed in `first_value_fields` is non-empty and its `First [Field Name]` target column is not yet stamped.
 
-**Does NOT fire when:**
-- Due Date is set for the first time (stamps `First Due Date` instead)
-- Due Date is cleared (set to empty)
-- Due Date is unchanged
+**Action:** Stamps `First [Field Name]` with the current value of the source field. Write-once: never overwrites. If cleared manually, re-stamps on the next poll.
 
-**Governance:**
-- If `Due Date Update Count` is `None`, initialize to `0`
-- If `First Due Date` is empty but `Due Date` is set, stamp `First Due Date` with the current `Due Date` value
+**Config:** `first_value_fields = ["Due Date", "Status"]` in the `[[databases]]` block.
 
-**Notion fields required:**
+**Naming convention:** The bot looks for a column named `First [Field Name]` in the database schema. Missing columns are skipped silently — no config needed beyond listing the source field name.
 
-| Field | Type |
-|---|---|
-| `Due Date` | Date |
-| `Due Date Update Count` | Number |
-| `First Due Date` | Date |
+**Supported source types:** date, select, status, number, rich_text, url, email, phone_number.
+
+**Target column types:** date source to date target preserves start and end (handles date ranges). All other types write to a rich_text target as the option name or string value.
+
+**Backward compat:** `due_date_tracking = true` is treated as `first_value_fields = ["Due Date"]` with a one-time deprecation warning logged per database.
 
 ---
 
-### 6.3 `auto_last_edited_note` *(disabled)*
+### 6.3 `auto_update_count`
+
+**Trigger:** A field listed in `update_count_fields` changes value between two polls.
+
+**Does NOT fire when:**
+- The field is set for the first time (no previous snapshot to compare)
+- The field is cleared
+- The value is unchanged
+- For date fields: only the time component changed (date portion must differ)
+
+**Governance:** initializes the `[Field Name] Update Count` column to `0` if it is null.
+
+**Config:** `update_count_fields = ["Due Date", "Status"]` in the `[[databases]]` block.
+
+**Naming convention:** same as `auto_first_value` — the bot looks for `[Field Name] Update Count` (Number type) in the schema. Missing columns are skipped.
+
+**Supported source types:** same as `auto_first_value`. Date fields compare the `YYYY-MM-DD` prefix only.
+
+**Backward compat:** `due_date_tracking = true` is treated as `update_count_fields = ["Due Date"]` with a one-time deprecation warning.
+
+---
+
+### 6.4 `auto_last_edited_note` *(disabled)*
 
 **Trigger:** Any property on the page changes.
 
@@ -817,7 +834,7 @@ Resolved design decisions. Each entry states the rule and the reason so future c
 - Bot writes use the new field name. The old field name must be retired in the Notion database before deploying updated code (bot writes to a non-existent field fail silently).
 
 **[Per-database automation config] Automations are enabled per-database via `[[databases]]` blocks in `config.toml` (replaces flat `database_ids` list).**
-- Flags: `closed_date`, `reopen_count`, `due_date_tracking`. Absent = disabled (opt-in).
+- Flags: `closed_date`, `reopen_count`, `first_value_fields`, `update_count_fields`. Absent = disabled (opt-in). `due_date_tracking = true` is a deprecated alias for `first_value_fields = ["Due Date"]` plus `update_count_fields = ["Due Date"]`; logs a one-time warning per database.
 - Rationale: prevents batch-poisoning — if a flag's column doesn't exist, that flag is simply disabled rather than causing a 400 error that silently rejects the entire update batch (including writes to other columns like Closed Date).
 - Implementation: `automations.py` holds `_db_configs: dict[str, dict]`. `register_db(db_id, cfg)` is called once per database at startup. Each automation reads `page["parent"]["database_id"]` to look up its flags — no signature changes to automation functions.
 - Closed Date is required for recurring tasks to function. If absent from the task database schema, a CRITICAL error is logged at governance startup.
@@ -904,3 +921,11 @@ Ideas raised but deliberately not pursued in the near term. Kept here to preserv
 
 ---
 
+
+**[Field tracking generalized] `auto_due_date_update_count` replaced by `auto_first_value` and `auto_update_count`.**
+- `first_value_fields` and `update_count_fields` are list-typed config keys that replace the boolean `due_date_tracking`.
+- Naming convention auto-associates source and target columns: `First [Field Name]` and `[Field Name] Update Count`. No explicit field mapping in config.
+- Supported types: date, select, status, number, rich_text, url, email, phone_number. Checkbox, multi-select, relation, formula, rollup excluded.
+- Date fields compare only the date portion for update count; time-only changes are ignored.
+- Schema for the target database is fetched once per daemon run via `_get_db_schema()` in `automations.py` and cached. Missing target columns are skipped silently.
+- `due_date_tracking = true` is a deprecated alias; it logs a one-time warning per database and maps to `first_value_fields = ["Due Date"]` plus `update_count_fields = ["Due Date"]`.

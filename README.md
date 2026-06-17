@@ -234,28 +234,42 @@ reopen_count = true
 
 ---
 
-## Due Date Tracking
+## Field Tracking
 
-Tracks two things when a task's Due Date changes:
+Two config keys tell the bot which fields to watch. Both use naming conventions so no explicit field mapping is needed.
 
-- **First Due Date** — stamped once with the original due date, never overwritten. Shows how far the task drifted from its original plan.
-- **Due Date Update Count** — incremented each time the date portion of Due Date changes. Time-only changes (e.g. moving from 9am to 2pm on the same day) do not count.
+### First value snapshot
+
+For each field listed in `first_value_fields`, the bot looks for a column named `First [Field Name]` in the database and stamps it with the field's first observed non-empty value. The stamp is write-once: the bot never overwrites it. If you clear it manually, the bot re-stamps on the next poll.
+
+Supported field types: Date, Select, Status, Number, Text, URL, Email, Phone.
+
+**Example:** add `"Due Date"` to get `First Due Date` stamped automatically. Add `"Status"` to capture the status a task had when first seen.
+
+### Update count
+
+For each field listed in `update_count_fields`, the bot looks for a `[Field Name] Update Count` number column and increments it whenever the value changes. For Date fields, only a change to the date portion counts; a time-only adjustment on the same day does not increment the counter.
 
 ### Notion setup
 
-Add the following fields to your task database:
+Create columns in your task database following the naming convention:
 
-| Field | Type |
-|---|---|
-| `First Due Date` | Date |
-| `Due Date Update Count` | Number |
+| Column name | Type | Tracks |
+|---|---|---|
+| `First Due Date` | Date | First value of Due Date |
+| `Due Date Update Count` | Number | How many times Due Date changed |
+| `First Status` | Text | Status when task was first seen |
+| `Status Update Count` | Number | How many times Status changed |
+
+Add only the columns you want. Missing columns are silently skipped.
 
 ### Config
 
 ```toml
 [[databases]]
-id                = "your-database-id"
-due_date_tracking = true
+id                  = "your-database-id"
+first_value_fields  = ["Due Date"]
+update_count_fields = ["Due Date"]
 ```
 
 ---

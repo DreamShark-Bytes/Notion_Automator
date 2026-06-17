@@ -24,6 +24,7 @@ except ImportError:
 from notion_api import NotionClient
 import notion_api as _notion_api
 from automations import AUTOMATIONS, GOVERNANCE, register_db as register_automation_db
+from recurring_tasks import configure_non_completion_statuses
 from bot_notes import clear_bot_notes, flush_bot_notes
 import recurring_tasks
 from recurring_tasks import BOT_CREATED_PAGES_KEY
@@ -356,6 +357,10 @@ def main():
     if not databases:
         raise RuntimeError("No [[databases]] entries found in config.toml")
     database_ids = [db["id"] for db in databases]
+    non_completion = cfg.get("non_completion_statuses")
+    if non_completion is not None:
+        configure_non_completion_statuses(non_completion)
+
     for db in databases:
         register_automation_db(db["id"], db)
 
