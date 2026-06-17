@@ -6,11 +6,13 @@ Notion's built-in automations are powerful but gated behind paid plans and limit
 
 ![Notion task database showing the Main Task Table with multiple view tabs — By Due Date, All Tasks, Open Recurring Tasks, Shopping List, All Recurring Tasks — and tasks organized chronologically with Due Date, Area, Pursuit, and Status fields.](assets/TouchedUp_MainTaskDatabase.png)
 
+**[Duplicate the Notion template](https://dreamshark.notion.site/Task-Tracker-Nexus-Template-37d326b7c770805699c8d0478363c6e4)** to get the pre-built database setup, then follow the steps below to connect the daemon.
+
 ## Features
 
 - **[Closed Date Stamping](#closed-date-stamping)** — automatically stamps a Closed Date when a task is marked done, and clears it on reopen.
 - **[Reopen Count](#reopen-count)** — tracks how many times a task has been reopened.
-- **[Due Date Tracking](#due-date-tracking)** — records the first due date ever set and counts how many times the due date has been changed.
+- **[Field Tracking](#field-tracking)** — records the first observed value of any configured field and counts how many times it changes.
 - **[Recurring Tasks](#recurring-tasks)** — keeps one open task per series at all times; creates the next task automatically when one is completed or cancelled. Supports habits, responsibilities, and more.
 - **[Custom Automations](#adding-your-own-automations)** — write your own rules in Python with full access to page properties and change history.
 
