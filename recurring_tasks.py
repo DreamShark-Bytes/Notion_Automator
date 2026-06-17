@@ -722,17 +722,20 @@ def _create_next_task(
         cadence_type = "Exactly N per period"
     if cadence_type == "At most N per period":  # legacy name
         cadence_type = "Maximum N per period"
+    definition_id = definition["id"]
+    def_name = _get_title(definition) or "Recurring Task"
     task_type    = _get_select(definition, "Type")
     if task_type not in {"Habit", "Responsibility", "Bad Habit"}:
-        logger.warning(f"RTD '{def_name}': Type is '{task_type}' — unrecognized or empty, defaulting to 'Habit'.")
-        task_type = "Habit"
+        if task_type and task_type != "None":
+            logger.warning(f"RTD '{def_name}': Type '{task_type}' is unrecognized — skipping task creation.")
+        else:
+            logger.debug(f"RTD '{def_name}': Type is not configured — skipping task creation.")
+        return
     period = _get_select(definition, "Period")
     anchor_day_raw = _get_number(definition, "Anchor Day")
     anchor_day = int(anchor_day_raw) if anchor_day_raw is not None else None
     anchor_time = _get_text(definition, "Anchor Time")
     cadence_n = _get_number(definition, "N Cadence")
-    definition_id = definition["id"]
-    def_name = _get_title(definition) or "Recurring Task"
 
     now = datetime.now().astimezone()
     current_period_key = _period_key(period, now) if period else None
@@ -1034,8 +1037,11 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
         # Runs before the 0/multiple-open check so cancelled tasks don't count.
         task_type = _get_select(definition, "Type")
         if task_type not in {"Habit", "Responsibility", "Bad Habit"}:
-            logger.warning(f"RTD '{def_name}': Type is '{task_type}' — unrecognized or empty, defaulting to 'Habit'.")
-            task_type = "Habit"
+            if task_type and task_type != "None":
+                logger.warning(f"RTD '{def_name}': Type '{task_type}' is unrecognized — skipping.")
+            else:
+                logger.debug(f"RTD '{def_name}': Type is not configured — skipping.")
+            continue
         cancelled_ids: set[str] = set()
         cancelled_tasks: list[dict] = []
         carried_over_ids: set[str] = set()
@@ -1505,8 +1511,11 @@ def auto_recurring_tasks(client: "NotionClient", page: dict, prev_page: dict | N
 
             task_type = _get_select(definition, "Type")
             if task_type not in {"Habit", "Responsibility", "Bad Habit"}:
-                logger.warning(f"RTD '{_get_title(definition)}': Type is '{task_type}' — unrecognized or empty, defaulting to 'Habit'.")
-                task_type = "Habit"
+                if task_type and task_type != "None":
+                    logger.warning(f"RTD '{_get_title(definition)}': Type '{task_type}' is unrecognized — skipping initialization.")
+                else:
+                    logger.debug(f"RTD '{_get_title(definition)}': Type is not configured — skipping initialization.")
+                return {}
             count = _count_tasks_in_period(client, definition["id"], period, current_pk)
             updates: dict = {"Occurrence # this Period (Recurring Task)": {"number": count + 1}}
             if current_pk:
