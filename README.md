@@ -29,7 +29,7 @@ Notion's built-in automations are powerful but gated behind paid plans and limit
   - [6. Run as a System Service](#6-run-as-a-system-service)
 - [Closed Date Stamping](#closed-date-stamping)
 - [Reopen Count](#reopen-count)
-- [Due Date Tracking](#due-date-tracking)
+- [Field Tracking](#field-tracking)
 - [Recurring Tasks](#recurring-tasks)
 - [Adding Your Own Automations](#adding-your-own-automations)
 - [Tuning Poll Interval](#tuning-poll-interval)
@@ -310,6 +310,7 @@ Add these fields to your main tasks database:
 | Occurrence # this Period (Recurring Task) | Number   | No       | Count of completions this period; filled in by the bot                        |
 | Period Key (Recurring Task)               | Text     | No       | Display label for the current period — written by the bot, do not edit        |
 | Period Target (Recurring Task)            | Text     | No       | e.g. `Minimum 3 per Week` — set by the bot at creation                        |
+| Ignore Grace Period (Recurring Task)      | Checkbox | No       | Prevents grace-period auto-cancellation for this specific task instance. The bot sets this automatically when you reopen a Responsibility task, but you can also check it manually — useful when you've customized a task (renamed it, adjusted the due date) and don't want it auto-cancelled. New tasks from the series always start with this unchecked. |
 
 Connect your integration to both databases (`...` menu → **Add connections**).
 
@@ -410,6 +411,9 @@ The system supports one Anchor Day per series definition. To track a recurring a
 **Applying RTD config changes immediately:**
 Changing an RTD's `Period`, `Cadence Type`, or `N Cadence` doesn't trigger governance right away — the change takes effect at the next daemon startup or daily governance cron. To apply it immediately without waiting: set the RTD's Status to inactive, wait one poll cycle (default 60s), then set it back to Active. The Status → Active transition triggers an immediate governance run that drift-corrects all affected tasks. A one-click Force Governance option is planned as part of the Automation Hub.
 
+**Protecting a customized Responsibility task from auto-cancellation:**
+If you edit a specific recurring task instance — renaming it, changing the due date, scoping it to a particular case — you may not want the grace period cron to cancel it on schedule. Check `Ignore Grace Period (Recurring Task)` directly on that task. The bot will skip it during every grace period evaluation for as long as it stays open. When you close it, the next task in the series is created fresh with the checkbox unchecked, so normal behavior resumes automatically.
+
 **`Current Period` field — filtering tasks to the current period in Notion:**
 Add a `Current Period` Date field to your definitions database. Governance writes the current period's start and end datetimes to it on every governance pass. You can then use a Notion formula on your task pages to check whether a task's Due Date falls within the current period:
 
@@ -465,6 +469,5 @@ See `PLANNED.md` for full details.
 
 - **Automation Hub** — A single Notion page as the daemon's home base. Surfaces health, errors, and warnings; eventually replaces `config.toml` for behavioral settings that change frequently.
 - **Extended Cadence** — Support for cadences spanning multiple periods (bi-weekly, quarterly, etc.) with a simplified picker and a Custom mode.
-- **First Value Field Tracking** — Automatically stamp a `First [Field Name]` column with the first observed value of any configured field.
 - **Notifications** — Outbound webhook support (Discord, Telegram) for alerts on governance events.
 - **Change Tracking** — Opt-in field change log with old/new values and timestamps, feeding into reporting tools.

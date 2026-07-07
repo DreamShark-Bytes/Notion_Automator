@@ -362,7 +362,7 @@ The definitions database is created manually by the user (see README §6). Autom
 | Last Completed         | Rollup                 | Max of `Closed Date` from related tasks (Notion-computed)                                                                                                                                                                                                                                    |
 | Number of Open Tasks   | Rollup                 | Count of related tasks where `Is Open` = true (Notion-computed via checkbox formula workaround — see §7.1 Is Open field)                                                                                                                                                                     |
 | Bot Notes              | Rich Text              | **Bot-managed.** Written by GOVERNANCE functions via the Bot Notes accumulator. Contains a bulleted list of current issues (e.g. duplicate name warning). Cleared automatically when all issues are resolved. User should not edit — content is overwritten each governance run.             |
-| Current Open Taskss    | Relation → MT Database | **Notion field not yet created — see PLANNED.md.** Bot tracks open tasks per RTD in memory; this Relation field exposes that tracking as a Notion property. Planned to hold all current bot-tracked open tasks (multi-relation). Required for deletion detection and one-click close button. |
+| Current Open Tasks     | Relation → MT Database | **Notion field not yet created — see PLANNED.md.** Bot tracks open tasks per RTD in memory; this Relation field exposes that tracking as a Notion property. Planned to hold all current bot-tracked open tasks (multi-relation). Required for deletion detection and one-click close button. |
 | Description            | Rich Text              |                                                                                                                                                                                                                                                                                              |
 
 
@@ -376,7 +376,7 @@ Fields specific to recurring task functionality are named with the suffix `(Recu
 | Occurrence # this Period (Recurring Task) | Number             | Set by bot at creation; see counting rules below                                                                                                                                                                                                                                                                      |
 | Period Key (Recurring Task)               | Text               | **Display-only label** set by bot (e.g. `2026-04`, `W-2026-05-25`). Weekly format is `W-YYYY-MM-DD` using the week-start date. Never read by bot logic for period comparisons — period membership is always derived from Due Date (open tasks) or Closed Date (closed tasks).                                         |
 | Period Target (Recurring Task)            | Text               | Human-readable goal set by bot (e.g. `Minimum 3 per Week`)                                                                                                                                                                                                                                                            |
-| Ignore Grace Period (Recurring Task)      | Checkbox           | Default: False. Bot sets to True when a user re-opens a Responsibility task from the Complete group. Once True, **never reset by the bot** — that task instance is permanently ignored by grace period auto-close. The user owns closure entirely. New tasks created from this task's closure start fresh with False. |
+| Ignore Grace Period (Recurring Task)      | Checkbox           | Default: False. Bot sets to True when a user re-opens a Responsibility task from the Complete group. **Users may also set this manually** on any Responsibility task instance to prevent auto-cancellation for that specific task — useful when a task has been customized (e.g. renamed, due date adjusted) and should not be cancelled by the grace period cron. Once True, **never reset by the bot** — that task instance is permanently ignored by grace period auto-close. The user owns closure entirely. New tasks created from this task's closure start fresh with False. |
 | Is Open                                   | Formula → Checkbox | `prop("Status") == "Not started" or prop("Status") == "In progress" or prop("Status") == "On hold"`. Used as rollup target for "Number of Open Tasks" on the RTD. User-created Notion formula — bot never writes it.                                                                                                  |
 | Manual Created Date                       | Date               | User-managed only — bot never writes this. For retroactively created tasks; provides accurate dates for reporting. No effect on bot logic.                                                                                                                                                                            |
 
@@ -616,12 +616,12 @@ Resolved design decisions. Each entry states the rule and the reason so future c
 - Always-on; not config-controlled. Configurable field inheritance belongs in the Automation Hub.
 
 **[RTD optional field defaults] Empty or unrecognized RTD field values use safe defaults rather than erroring.**
-- `Type` empty or unknown → default to `"Habit"`, log a WARNING. Habit is the least-destructive default: no grace period, no auto-cancel, no quota logic.
+- `Type` empty, `"None"`, or unrecognized → skip the RTD silently (debug log for empty/"None"; WARNING for unrecognized values). No default type is applied — an unconfigured RTD creates no tasks until Type is set.
 - `Anchor Time` empty → no time constraint; Due Date is a date range covering the full period.
 - `Anchor Day` empty → full period range. (Previously produced an end-of-period anchor for non-Day periods; changed to full range for consistency with the Due Date Sort formula pattern.)
 - `Grace Period` empty or None → treat as 0 (cancel on due date, no buffer).
 - `Anchor Time` set without `Anchor Day` on non-Day periods → Anchor Time is ignored, full period range returned, WARNING logged. Anchor Time is only meaningful paired with an Anchor Day target day.
-- All three Type guard sites in `recurring_tasks.py` apply this default: `_create_next_task`, `run_recurring_governance`, and the init block of `auto_recurring_tasks`.
+- All three Type guard sites in `recurring_tasks.py` apply this behavior: `_create_next_task`, `run_recurring_governance`, and the init block of `auto_recurring_tasks`.
 
 ---
 
@@ -700,6 +700,7 @@ Resolved design decisions. Each entry states the rule and the reason so future c
 - New tasks created when the task eventually closes start with `False` (default) — fresh slate.
 - Trigger: bot sets True on **all** Responsibility re-opens (Complete → non-Complete transition), regardless of whether Grace Period is currently set or Do Not Autoclose is True on the RTD.
 - Reason for universal trigger: if the RTD later gains a Grace Period or Do Not Autoclose is changed, an already-reopened task would be unexpectedly auto-cancelled. The re-open is a fact about the task instance, not about the RTD's configuration at that moment. Keeping the flag clean at the cost of a True-when-unnecessary checkbox is far preferable to a surprising bot cancellation.
+- **Users may also set this manually.** Checking it directly on a specific task instance has the same effect — the grace period cron skips that task. Useful when a task has been customized (e.g. renamed, due date adjusted for a one-off) and should not be auto-cancelled.
 
 **[`auto_closed_date`] Renamed from `auto_last_closed`. Field renamed from `Last Closed` to `Closed Date`.**
 - On close: recurring tasks respect a user-set `Closed Date`; non-recurring tasks always stamp with `now()`.

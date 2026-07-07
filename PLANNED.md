@@ -7,6 +7,7 @@ Living design document. Sections are deleted when a feature is implemented and i
 ## Contents
 
 - [Extended Cadence (Every Y Periods)](#feature-extended-cadence-every-y-periods)
+- [Snapshot Pruning / Deleted Page Detection](#improvement-snapshot-pruning--deleted-page-detection)
 - [Governance Schema Validation](#improvement-governance-schema-validation)
 - [Schema-Check Safety Net in automations.py](#improvement-schema-check-safety-net-in-automationspy)
 - [Minimum N — Carry-Over Instead of Archive](#improvement-minimum-n-per-period--carry-over-instead-of-archive)
@@ -14,8 +15,7 @@ Living design document. Sections are deleted when a feature is implemented and i
 - [Automation Hub](#automation-hub-formerly-project-page)
 - [Notifications](#notifications)
 - [Clear Blocking/Blocked-By on Close](#clear-blockingblocked-by-on-close)
-- [First Value Field Tracking](#first-value-field-tracking)
-- [Field Update Count (Abstract)](#improvement-field-update-count-abstract)
+- [Cumulative Overdue Time Tracking](#improvement-cumulative-overdue-time-tracking)
 - [RTD Current Period Field](#improvement-rtd-current-period-field)
 - [Timer / Mission Tracking](#timer--mission-tracking)
 - [Automated Testing](#automated-testing)
@@ -106,6 +106,30 @@ Requires a migration script in `tools/` before shipping:
 - Governance Schema Validation (PLANNED) — add new fields to the validation table once implemented.
 - RTD Optional Fields Default Handling (PLANNED) — new fields need the same treatment.
 - Automation Hub — Current Period Start future-date warning surfaces in Hub Section 2.
+
+---
+
+## Improvement: Snapshot Pruning / Deleted Page Detection
+
+**Status:** Pre-design
+**One-liner:** Remove deleted Notion pages from the in-memory snapshot so stale entries do not accumulate across sessions or cause confusion after manual task deletion.
+
+### Problem
+
+`poll_database` initialises each new snapshot from a copy of the previous one (`new_snapshot = dict(snapshot)`). Pages deleted from Notion simply stop appearing in API results, so they are never removed. They stay in the snapshot indefinitely. Governance self-corrects because it calls `query_database` fresh each run, but the stale snapshot can confuse the automation path when manual task manipulation (delete + reopen old task + close) desynchs state. Workaround: deactivate and reactivate the RTD to force a fresh governance pass.
+
+### Options
+
+**Option A: Governance-level exclusion.** During each governance pass, cross-reference the open tasks for each RTD against the snapshot. Any snapshot entry not returned by the live query is treated as deleted and excluded from open-task counting. Low complexity; self-contained to the governance loop.
+
+**Option B: Snapshot pruning on full poll.** Periodically run a full (non-incremental) `query_database` for each watched database and remove snapshot keys that no longer appear. More thorough but adds API calls. Natural fit for the daily governance cron.
+
+**Option C: Per-page existence check.** When a snapshot entry has not been seen in N polls, verify it with a direct `GET /v1/pages/{id}` call and drop it if archived or deleted. Most precise but most API-heavy.
+
+Option A is the right starting point. Option B is a clean addition to the existing daily cron pass.
+
+### Dependencies
+- None — self-contained daemon improvement
 
 ---
 
