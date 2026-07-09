@@ -29,8 +29,8 @@ from bot_notes import clear_bot_notes, flush_bot_notes
 import recurring_tasks
 from recurring_tasks import BOT_CREATED_PAGES_KEY
 
-VERSION = "1.2.0"
-NOTION_API_MIN_VERSION = "1.1.0"
+VERSION = "1.2.1"
+NOTION_API_MIN_VERSION = "1.1.4"
 
 parser = argparse.ArgumentParser(description="Notion automation daemon")
 parser.add_argument(
@@ -303,16 +303,13 @@ def _poll_rtd_for_changes(
     change that requires immediate governance. All other field edits (Grace Period, N Cadence,
     Anchor Time, etc.) update the snapshot but do not trigger governance; they take effect on
     the next scheduled governance run. New RTDs created already set to Active also trigger.
+    Raises on network/API errors — callers must catch and must NOT advance their time pointer.
     """
     filter_payload = {
         "timestamp": "last_edited_time",
         "last_edited_time": {"on_or_after": since},
     }
-    try:
-        pages = client.query_database(rt_defs_id, filter_payload=filter_payload)
-    except Exception as e:
-        logger.error(f"Failed to poll RTD database: {e}")
-        return rtd_snapshot, False
+    pages = client.query_database(rt_defs_id, filter_payload=filter_payload)
 
     if not pages:
         return rtd_snapshot, False
@@ -514,10 +511,14 @@ def main():
         # RTD change detection — triggers governance only when an RTD is activated.
         if rt_defs_id and last_polled_rtd is not None:
             rtd_poll_start = _utcnow_iso()
-            rtd_snapshot, rtd_activated = _poll_rtd_for_changes(
-                client, rt_defs_id, rtd_snapshot, last_polled_rtd
-            )
-            last_polled_rtd = rtd_poll_start
+            try:
+                rtd_snapshot, rtd_activated = _poll_rtd_for_changes(
+                    client, rt_defs_id, rtd_snapshot, last_polled_rtd
+                )
+                last_polled_rtd = rtd_poll_start  # only advance on success
+            except Exception as e:
+                logger.error(f"Failed to poll RTD database: {e}")
+                rtd_activated = False
             if rtd_activated:
                 gov_created = run_governance(client)
                 if gov_created:
