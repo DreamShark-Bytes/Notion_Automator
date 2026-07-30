@@ -471,3 +471,6 @@ See `PLANNED.md` for full details.
 - **Extended Cadence** — Support for cadences spanning multiple periods (bi-weekly, quarterly, etc.) with a simplified picker and a Custom mode.
 - **Notifications** — Outbound webhook support (Discord, Telegram) for alerts on governance events.
 - **Change Tracking** — Opt-in field change log with old/new values and timestamps, feeding into reporting tools.
+
+----
+<p style="text-align:center;">This project is licensed under the terms of the MIT license.</p>
