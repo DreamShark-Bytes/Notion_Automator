@@ -5,6 +5,55 @@
 
 ---
 
+## Quick Reference
+
+_Orientation only. Use `grep -n "^## " DESIGN.md` for full TOC with line numbers. Read specific sections with `Read offset/limit`._
+
+**What it does:** Polling daemon that reads Notion databases, applies rule-based automations on changed pages, and writes results back to Notion. No local database — write-back only.
+
+**Components:**
+
+| Module | Role |
+|---|---|
+| `daemon.py` | Orchestrator — poll loop, startup, governance cron |
+| `notion_api.py` | Thin REST wrapper (from Notion_API package — never call REST directly) |
+| `recurring_tasks.py` | All recurring task logic + shared helpers |
+| `automations.py` | AUTOMATIONS and GOVERNANCE registries |
+| `bot_notes.py` | Bot Notes accumulator (flushed after each governance run) |
+| `hub.py` | Automation Hub — in progress (feature/automation-hub branch) |
+
+**Design principles (never re-debated per feature):**
+- Minimum surprise — bot never takes an action the user wouldn't expect
+- Least-destructive — inform > archive > cancel > delete
+- Consequential decisions go to the user via Bot Notes, not silent bot action
+- Bot-managed fields (Period Key, Occurrence #, Closed Date, Bot Notes) are owned exclusively by the bot — user edits are overwritten on next poll
+
+**Key decisions (one line each):**
+- Period membership always derived from dates (Due Date / Closed Date), never from stored Period Key
+- Cleanup uses `archive_page()`, never Cancellation — Cancellation triggers re-creation
+- Deleted/archived task → bot creates replacement + Bot Note; user decides whether to continue series
+- `auto_recurring_tasks` must remain last in AUTOMATIONS registry
+- RTD Type empty/None → skip silently; unrecognized → WARNING; no default type applied
+- Hub owns behavioral config; config.toml keeps token/IDs/poll_interval/week_start/day_start_hour
+
+**Section map:**
+
+| Section | Line | Content |
+|---|---|---|
+| §1 Purpose | ~18 | What the daemon does |
+| §1.1 Design Principles | ~26 | Governing rules |
+| §2 Architecture | ~40 | Diagram + startup sequence + CLI flags |
+| §3 Components | ~60 | daemon.py, notion_api.py, recurring_tasks.py, automations.py, bot_notes.py |
+| §4 In-Memory Snapshot | ~225 | Snapshot structure and behavior |
+| §5 Governance System | ~245 | GOVERNANCE registry, cron, Bot Notes flush |
+| §6 Current Automations | ~261 | auto_closed_date, auto_recurring_tasks detail |
+| §7 Recurring Tasks | ~343 | Full design: cadences, period detection, RTD fields, governance |
+| §8 Adding Automation | ~593 | How to add a new automation function |
+| §9 Known Limitations | ~606 | Documented constraints |
+| §10 Decision Log | ~616 | Resolved decisions — never re-litigate |
+
+---
+
 ## 1. Purpose
 
 Notion Automator is a background daemon that watches one or more Notion databases and applies rule-based automations whenever pages change. It runs on a schedule, compares each page against a stored snapshot of its previous state, and writes property updates back to Notion.

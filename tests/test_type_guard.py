@@ -16,6 +16,16 @@ import recurring_tasks
 from helpers import make_definition
 
 
+_DUMMY_PAIR = {
+    "definitions_db_id":       "b" * 32,
+    "tasks_db_id":             "a" * 32,
+    "closed_date_field":       "Closed Date",
+    "non_completion_statuses": None,
+    "inherited_fields":        [],
+    "_task_schema":            None,
+}
+
+
 @pytest.mark.parametrize("type_value", [
     None,         # empty field — not configured yet
     "None",       # explicit "None" select option
@@ -25,17 +35,17 @@ from helpers import make_definition
 ])
 def test_skips_and_makes_no_api_calls(type_value):
     client = MagicMock()
-    recurring_tasks._create_next_task(client, None, make_definition(type_value))
+    recurring_tasks._create_next_task(client, None, make_definition(type_value), _DUMMY_PAIR)
     client.query_database.assert_not_called()
     client.create_page.assert_not_called()
     client.update_page_properties.assert_not_called()
 
 
 @pytest.mark.parametrize("type_value", ["Habit", "Responsibility", "Bad Habit"])
-def test_valid_type_passes_guard(type_value, monkeypatch):
+def test_valid_type_passes_guard(type_value):
     """Valid types proceed past the guard and attempt API calls."""
-    monkeypatch.setattr(recurring_tasks, "_tasks_db_id", "test-db-id")
+    pair = dict(_DUMMY_PAIR, tasks_db_id="test-db-id")
     client = MagicMock()
     client.query_database.return_value = []
-    recurring_tasks._create_next_task(client, None, make_definition(type_value))
+    recurring_tasks._create_next_task(client, None, make_definition(type_value), pair)
     client.query_database.assert_called()

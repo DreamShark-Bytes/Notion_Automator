@@ -6,12 +6,18 @@ wiki-drafts/
 
 # Secrets
 config.toml
+config_backup.toml
+*.bak
 .env
+
+# Hub runtime files (workspace-specific Notion IDs — not for version control)
+config_hub.toml
+config_hub_backup.toml
 
 # Claude Code
 .claude/
 CLAUDE*.md
-*Session-History.md
+*Session-History*.md
 
 # Python
 __pycache__/

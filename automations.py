@@ -185,25 +185,25 @@ def auto_closed_date(client: "NotionClient", page: dict, prev_page: dict | None)
       - Status is Complete but 'Closed Date' is empty -> backfill with last_edited_time.
     """
     flags = _flags(page)
-    if not flags.get("closed_date"):
+    closed_date_field = flags.get("closed_date_field")
+    if not closed_date_field:
         return {}
+    reopen_count_field = flags.get("reopen_count_field")
 
-    STATUS_FIELD       = "Status"
-    DONE_GROUP         = "Complete"
-    CLOSED_DATE_FIELD  = "Closed Date"
-    REOPEN_COUNT_FIELD = "Reopen Count"
+    STATUS_FIELD = "Status"
+    DONE_GROUP   = "Complete"
 
     current_group = _get_status_group(client, page, STATUS_FIELD)
     prev_group    = _get_status_group(client, prev_page, STATUS_FIELD)
-    closed_date   = _get_date(page, CLOSED_DATE_FIELD)
-    reopen_count  = _get_number(page, REOPEN_COUNT_FIELD)
+    closed_date   = _get_date(page, closed_date_field)
+    reopen_count  = _get_number(page, reopen_count_field) if reopen_count_field else None
     logger.info(f"Compare groups: {current_group=} -> {prev_group=}, closed_date={closed_date!r}, reopen_count={reopen_count!r}")
 
     updates = {}
 
     # Governance: initialize Reopen Count if missing (only if reopen_count tracking is enabled)
-    if flags.get("reopen_count") and reopen_count is None:
-        updates[REOPEN_COUNT_FIELD] = {"number": 0}
+    if reopen_count_field and reopen_count is None:
+        updates[reopen_count_field] = {"number": 0}
         reopen_count = 0
 
     # Transition: status moved INTO Complete (close)
@@ -212,15 +212,15 @@ def auto_closed_date(client: "NotionClient", page: dict, prev_page: dict | None)
             logger.info("Status moved to Complete (Closed Date already set) — respecting user date")
         else:
             logger.info("Status moved to Complete — stamping Closed Date")
-            updates[CLOSED_DATE_FIELD] = {"date": {"start": _now_local_iso()}}
+            updates[closed_date_field] = {"date": {"start": _now_local_iso()}}
         return updates
 
     # Transition: status moved OUT OF Complete (reopen)
     if prev_page is not None and prev_group == DONE_GROUP and current_group != DONE_GROUP:
         logger.info("Status moved out of Complete — clearing Closed Date, incrementing Reopen Count")
-        updates[CLOSED_DATE_FIELD] = {"date": None}
-        if flags.get("reopen_count"):
-            updates[REOPEN_COUNT_FIELD] = {"number": reopen_count + 1}
+        updates[closed_date_field] = {"date": None}
+        if reopen_count_field:
+            updates[reopen_count_field] = {"number": reopen_count + 1}
         return updates
 
     # Governance: non-Complete task still has a Closed Date — missed reopen while daemon was down.
@@ -229,9 +229,9 @@ def auto_closed_date(client: "NotionClient", page: dict, prev_page: dict | None)
     # actually closes the task. The explicit reopen transition above handles the live case.
     if current_group != DONE_GROUP and closed_date and prev_page is page:
         logger.info("Governance: non-Complete task has Closed Date — missed reopen; clearing Closed Date, incrementing Reopen Count")
-        updates[CLOSED_DATE_FIELD] = {"date": None}
-        if flags.get("reopen_count"):
-            updates[REOPEN_COUNT_FIELD] = {"number": reopen_count + 1}
+        updates[closed_date_field] = {"date": None}
+        if reopen_count_field:
+            updates[reopen_count_field] = {"number": reopen_count + 1}
         return updates
 
     # Governance: already Complete but Closed Date never set — backfill.
@@ -241,8 +241,8 @@ def auto_closed_date(client: "NotionClient", page: dict, prev_page: dict | None)
         raw_ts = page.get("last_edited_time")
         dt = _parse_closed_dt(raw_ts) if raw_ts else None
         backfill = dt.isoformat() if dt else _now_local_iso()
-        logger.info(f"Governance: 'Closed Date' missing for completed task — backfilling: {backfill}")
-        updates[CLOSED_DATE_FIELD] = {"date": {"start": backfill}}
+        logger.info(f"Governance: '{closed_date_field}' missing for completed task — backfilling: {backfill}")
+        updates[closed_date_field] = {"date": {"start": backfill}}
         return updates
 
     return updates

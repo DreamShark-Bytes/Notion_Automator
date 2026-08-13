@@ -28,12 +28,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------ #
-#  Module state — set via init()
+#  Module state — set via configure_pairs()
 # ------------------------------------------------------------------ #
 
-_definitions_db_id: str | None = None
-_tasks_db_id: str | None = None
-_task_db_properties: set[str] = set()  # populated lazily on first governance/automation run
+# Each pair dict: {definitions_db_id, tasks_db_id, closed_date_field,
+#                  non_completion_statuses (frozenset|None), inherited_fields (list[str]),
+#                  _task_schema (set[str]|None)}
+_rtd_pairs: list[dict] = []
+_pair_by_tasks_db: dict[str, dict] = {}  # normalized tasks_db_id -> pair dict
+
 _week_start_day: int = 0  # 0 = Monday … 6 = Sunday; configurable via week_start in config.toml
 _day_start_hour: int = 0  # Hour (0–23) when the logical day begins; midnight to this hour is "yesterday"
 
@@ -73,59 +76,122 @@ def set_reconcile_flags(
     _reconcile_occurrence_number = occurrence_number
 
 
-def init(definitions_db_id: str, tasks_db_id: str, week_start_day: int = 0, day_start_hour: int = 3) -> None:
-    """Call once at daemon startup to enable recurring task automation.
+def configure_pairs(
+    pairs: list[dict],
+    week_start_day: int = 0,
+    day_start_hour: int = 3,
+) -> None:
+    """Configure all RTD pairs and timing settings. Call once at daemon startup.
 
-    week_start_day: 0 = Monday (default/ISO), 6 = Sunday, etc.
-    day_start_hour: whole hour (0–23) when the logical day begins. Times from midnight to
-        day_start_hour are attributed to the previous calendar day for all period
-        calculations. Default 3 (3am).
+    Each pair dict must contain:
+        definitions_db_id (str), tasks_db_id (str), closed_date_field (str),
+        non_completion_statuses (list[str] — empty uses built-in defaults),
+        inherited_fields (list[str] — empty = inherit nothing).
+
+    week_start_day: 0 = Monday (default/ISO), 6 = Sunday.
+    day_start_hour: whole hour (0–23) when the logical day begins.
     """
-    global _definitions_db_id, _tasks_db_id, _week_start_day, _day_start_hour
-    _definitions_db_id = definitions_db_id
-    _tasks_db_id = tasks_db_id
+    global _rtd_pairs, _pair_by_tasks_db, _week_start_day, _day_start_hour
     _week_start_day = week_start_day
     _day_start_hour = day_start_hour
+    _rtd_pairs = []
+    _pair_by_tasks_db = {}
 
+    seen_tasks: dict[str, str] = {}
+    seen_defs:  dict[str, str] = {}
+    dup_tasks:  set[str] = set()
+    dup_defs:   set[str] = set()
 
-def configure_non_completion_statuses(statuses: list[str]) -> None:
-    """Set the global non-completion status list from config.toml.
+    for p in pairs:
+        t_id = p["tasks_db_id"].replace("-", "")
+        d_id = p["definitions_db_id"].replace("-", "")
+        label = p.get("_row_name") or f"tasks={t_id}"
+        if t_id in seen_tasks:
+            logger.error(
+                f"configure_pairs: tasks_db_id '{t_id}' shared by pairs "
+                f"'{seen_tasks[t_id]}' and '{label}' — both disabled."
+            )
+            dup_tasks.add(t_id)
+        else:
+            seen_tasks[t_id] = label
+        if d_id in seen_defs:
+            logger.error(
+                f"configure_pairs: definitions_db_id '{d_id}' shared by pairs "
+                f"'{seen_defs[d_id]}' and '{label}' — both disabled."
+            )
+            dup_defs.add(d_id)
+        else:
+            seen_defs[d_id] = label
 
-    Called once at daemon startup. Statuses are normalized the same way as
-    _normalize_status() so the lookup is case-insensitive and punctuation-insensitive.
-    """
-    global _configured_non_completion_statuses
-    _configured_non_completion_statuses = frozenset(
-        re.sub(r'[^a-z]', '', s.lower()) for s in statuses
+    for p in pairs:
+        t_id = p["tasks_db_id"].replace("-", "")
+        d_id = p["definitions_db_id"].replace("-", "")
+        if t_id in dup_tasks or d_id in dup_defs:
+            continue
+        raw_statuses = p.get("non_completion_statuses") or []
+        norm_statuses: frozenset[str] | None = (
+            frozenset(re.sub(r'[^a-z]', '', s.lower()) for s in raw_statuses)
+            if raw_statuses else None
+        )
+        pair: dict = {
+            "definitions_db_id":       d_id,
+            "tasks_db_id":             t_id,
+            "closed_date_field":       p.get("closed_date_field") or "Closed Date",
+            "non_completion_statuses": norm_statuses,  # None = use built-in NON_COMPLETION_STATUSES
+            "inherited_fields":        list(p.get("inherited_fields") or []),
+            "_task_schema":            None,
+        }
+        _rtd_pairs.append(pair)
+        _pair_by_tasks_db[t_id] = pair
+
+    logger.info(
+        f"configure_pairs: {len(_rtd_pairs)} RTD pair(s) active "
+        f"(week_start_day={week_start_day}, day_start_hour={day_start_hour})."
     )
 
 
-def _load_task_db_schema(client: "NotionClient") -> None:
-    """Query the task database schema once and cache the property names.
+def init(definitions_db_id: str, tasks_db_id: str, week_start_day: int = 0, day_start_hour: int = 3) -> None:
+    """Backward-compat wrapper for single-pair setups. Prefer configure_pairs()."""
+    configure_pairs(
+        [{
+            "definitions_db_id":       definitions_db_id,
+            "tasks_db_id":             tasks_db_id,
+            "closed_date_field":       "Closed Date",
+            "non_completion_statuses": [],
+            "inherited_fields":        [],
+        }],
+        week_start_day=week_start_day,
+        day_start_hour=day_start_hour,
+    )
+
+
+def _load_task_db_schema(client: "NotionClient", pair: dict) -> None:
+    """Query the task database schema for this pair and cache it in pair["_task_schema"].
 
     Called lazily on the first governance/automation run. Subsequent calls are no-ops.
     If the query fails, optional fields are written unconditionally (safe fallback).
     """
-    global _task_db_properties
-    if _task_db_properties or not _tasks_db_id:
+    if pair.get("_task_schema") is not None or not pair.get("tasks_db_id"):
         return
     try:
-        db = client.get_database(_tasks_db_id)
-        _task_db_properties = set(db.get("properties", {}).keys())
-        logger.info(f"Task DB schema loaded: {len(_task_db_properties)} properties found.")
+        db = client.get_database(pair["tasks_db_id"])
+        pair["_task_schema"] = set(db.get("properties", {}).keys())
+        logger.info(f"Task DB schema loaded for {pair['tasks_db_id']}: {len(pair['_task_schema'])} properties.")
     except Exception as e:
-        logger.warning(f"Could not load task DB schema — optional fields written unconditionally: {e}")
+        logger.warning(f"Could not load task DB schema for {pair['tasks_db_id']}: {e}")
+        pair["_task_schema"] = set()
 
 
-def _filter_optional(props: dict) -> dict:
+def _filter_optional(props: dict, pair: dict) -> dict:
     """Remove optional task fields not present in the task database schema.
 
     Required fields always pass through. If the schema hasn't been loaded yet,
     all fields pass through (safe fallback — avoids masking bugs on first run).
     """
-    if not _task_db_properties:
+    schema = pair.get("_task_schema")
+    if not schema:
         return props
-    return {k: v for k, v in props.items() if k not in OPTIONAL_TASK_FIELDS or k in _task_db_properties}
+    return {k: v for k, v in props.items() if k not in OPTIONAL_TASK_FIELDS or k in schema}
 
 
 # ------------------------------------------------------------------ #
@@ -133,6 +199,7 @@ def _filter_optional(props: dict) -> dict:
 # ------------------------------------------------------------------ #
 
 FIELDS_NOT_INHERITED = {
+    "Name",
     "Closed Date",
     "Reopen Count",
     "First Due Date",
@@ -144,6 +211,8 @@ FIELDS_NOT_INHERITED = {
     "Period Target (Recurring Task)",
     "Ignore Grace Period (Recurring Task)",
     "Recurring Series",
+    "Primary Tasks (Relationship)",
+    "Secondary Tasks (Relationship)",
 }
 
 # RTD Status field — replaces the Active checkbox. Only RTDs with this status create tasks.
@@ -161,10 +230,6 @@ NON_COMPLETION_STATUSES: frozenset[str] = frozenset({
     "ignored", "abandoned",
     "destroyed", "disintegrated", "vaporized", "yeeted", "evaporated", "banished", "purchased", "bought"
 })
-
-# Configured non-completion statuses, set once at daemon startup from config.toml.
-# None means "not configured" — falls back to NON_COMPLETION_STATUSES.
-_configured_non_completion_statuses: frozenset[str] | None = None
 
 # Property types that are read-only and cannot be set via the API.
 # "files" is included because Notion does not support setting file attachments
@@ -523,17 +588,30 @@ def _build_period_target(cadence_type: str | None, cadence_n: float | None, peri
 #  Field copying
 # ------------------------------------------------------------------ #
 
-def _copy_task_fields(closed_task: dict) -> dict:
-    """Copy properties from a closed task, excluding bot-managed and read-only fields."""
+def _copy_task_fields(closed_task: dict, pair: dict) -> dict:
+    """Copy properties from a closed task using the pair's whitelist and dynamic exclusions.
+
+    If pair["inherited_fields"] is empty, returns {} (inherit nothing).
+    Non-empty list: copy only those properties (minus hardcoded and dynamic exclusions).
+    Hardcoded FIELDS_NOT_INHERITED and _READONLY_PROP_TYPES always apply.
+    """
+    closed_date_field  = pair.get("closed_date_field", "Closed Date")
+    reopen_count_field = pair.get("reopen_count_field", "Reopen Count")
+    dynamic_exclusions = {closed_date_field, reopen_count_field}
+    all_exclusions = FIELDS_NOT_INHERITED | dynamic_exclusions
+
+    inherited: list[str] = pair.get("inherited_fields") or []
+
     props = {}
     for name, prop in closed_task.get("properties", {}).items():
-        if name in FIELDS_NOT_INHERITED:
+        if name in all_exclusions:
             continue
         prop_type = prop.get("type")
         if not prop_type or prop_type in _READONLY_PROP_TYPES:
             continue
+        if name not in inherited:
+            continue  # whitelist: skip unless explicitly listed
         if prop_type == "people":
-            # Read format includes full user objects; write format only accepts {"id": "..."}.
             props[name] = {"people": [{"id": u["id"]} for u in (prop.get("people") or []) if u.get("id")]}
         else:
             props[name] = {prop_type: prop.get(prop_type)}
@@ -565,16 +643,17 @@ def _normalize_status(s: str | None) -> str:
     return re.sub(r'[^a-z]', '', s.lower())
 
 
-def _is_non_completion(status: str | None) -> bool:
+def _is_non_completion(status: str | None, pair: dict | None = None) -> bool:
     """Return True if the status represents a non-completion (cancelled, skipped, etc.).
 
-    Uses the list from configure_non_completion_statuses() when set, falling back
-    to the hardcoded NON_COMPLETION_STATUSES frozenset for installs that have not
-    added non_completion_statuses to config.toml.
+    When pair is provided and has a non_completion_statuses frozenset, uses that list.
+    Falls back to the built-in NON_COMPLETION_STATUSES frozenset otherwise.
     """
     normalized = _normalize_status(status)
-    if _configured_non_completion_statuses is not None:
-        return normalized in _configured_non_completion_statuses
+    if pair is not None:
+        configured = pair.get("non_completion_statuses")
+        if configured is not None:
+            return normalized in configured
     return normalized in NON_COMPLETION_STATUSES
 
 
@@ -638,16 +717,18 @@ def _count_tasks_in_period(
     definition_id: str,
     period: str | None,
     current_period_key: str | None,
+    pair: dict,
 ) -> int:
     """Count tasks for this RTD in the current period via API call.
 
     Used at task creation time when a pre-fetched task list is unavailable.
     """
-    if not _tasks_db_id or not current_period_key:
+    tasks_db_id = pair.get("tasks_db_id")
+    if not tasks_db_id or not current_period_key:
         return 0
     try:
         tasks = client.query_database(
-            _tasks_db_id,
+            tasks_db_id,
             filter_payload={"property": "Recurring Series", "relation": {"contains": definition_id}},
         )
     except Exception as e:
@@ -742,7 +823,7 @@ def _create_next_task(
     client: "NotionClient",
     closed_task: dict | None,
     definition: dict,
-    tasks_db_id: str | None = None,
+    pair: dict,
     force_next_period: bool = False,
 ) -> None:
     """Create the next recurring task based on the closed task and its definition."""
@@ -772,10 +853,11 @@ def _create_next_task(
     # Fetch all tasks for this definition first — used for use_next_period determination,
     # the duplicate guard, and Instance # count.
     fetched_tasks: list[dict] = []
-    if _tasks_db_id:
+    tasks_db_id = pair.get("tasks_db_id")
+    if tasks_db_id:
         try:
             fetched_tasks = client.query_database(
-                _tasks_db_id,
+                tasks_db_id,
                 filter_payload={"property": "Recurring Series", "relation": {"contains": definition_id}},
             )
         except Exception as e:
@@ -822,7 +904,7 @@ def _create_next_task(
                 1 for t in fetched_tasks
                 if _task_in_period(t, period, current_period_key)
                 and not _is_open(t)
-                and not _is_non_completion(_get_status(t, "Status"))
+                and not _is_non_completion(_get_status(t, "Status"), pair)
             )
             use_next_period = current_completions >= n_threshold
         else:
@@ -878,7 +960,7 @@ def _create_next_task(
         for t in fetched_tasks:
             if _get_status_group(client, t, "Status") == "Complete":
                 continue  # completed — not a duplicate
-            if _is_non_completion(_get_status(t, "Status")):
+            if _is_non_completion(_get_status(t, "Status"), pair):
                 continue  # cancelled/skipped — not a duplicate
             due_dt = _get_due_end_or_start(t)
             if due_dt and period:
@@ -913,7 +995,7 @@ def _create_next_task(
 
     # Merge inherited fields under base_props (base_props wins on conflict).
     if closed_task is not None:
-        props = {**_copy_task_fields(closed_task), **base_props}
+        props = {**_copy_task_fields(closed_task, pair), **base_props}
     else:
         props = base_props
 
@@ -921,8 +1003,6 @@ def _create_next_task(
     db_id = tasks_db_id
     if not db_id and closed_task:
         db_id = closed_task.get("parent", {}).get("database_id")
-    if not db_id:
-        db_id = _tasks_db_id
     if not db_id:
         logger.error("Cannot create recurring task: no tasks database ID available.")
         return
@@ -944,7 +1024,7 @@ def _create_next_task(
         return client.create_page(db_id, page_props, template={"type": "default"})
 
     try:
-        new_page = _do_create(_filter_optional(props))
+        new_page = _do_create(_filter_optional(props, pair))
         logger.info(f"Created recurring task for definition {definition_id}, instance #{new_instance}.")
         return new_page
     except Exception as e:
@@ -960,7 +1040,7 @@ def _create_next_task(
                 f"({notion_msg or e}). Retrying without inherited fields."
             )
             try:
-                new_page = _do_create(_filter_optional(base_props))
+                new_page = _do_create(_filter_optional(base_props, pair))
                 logger.info(f"Created recurring task for definition {definition_id}, instance #{new_instance} (no inherited fields).")
                 return new_page
             except Exception as e2:
@@ -990,103 +1070,105 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
     can run an automations init pass on them immediately (populating fields like
     Reopen Count and Due Date Update Count that are only written during init).
     """
-    if not _definitions_db_id or not _tasks_db_id:
+    if not _rtd_pairs:
         return []
 
-    _load_task_db_schema(client)
-    if _task_db_properties and "Closed Date" not in _task_db_properties:
-        logger.error(
-            "CRITICAL: 'Closed Date' column not found in the task database. "
-            "Recurring task period logic (occurrence counting, auto-cancel, period detection) "
-            "requires this field — results will be incorrect until the column is added."
-        )
     logger.info("Running recurring task governance ...")
     created_pages: list[dict] = []
 
-    try:
-        definitions = client.query_database(
-            _definitions_db_id,
-            filter_payload={"property": RTD_STATUS_FIELD, "status": {"equals": RTD_ACTIVE_STATUS}},
-        )
-    except Exception as e:
-        logger.error(f"Failed to fetch recurring definitions: {e}")
-        return
+    for pair in _rtd_pairs:
+        _load_task_db_schema(client, pair)
+        closed_date_field = pair.get("closed_date_field", "Closed Date")
+        schema = pair.get("_task_schema") or set()
+        if schema and closed_date_field not in schema:
+            logger.error(
+                f"CRITICAL: '{closed_date_field}' property not found in task database "
+                f"{pair['tasks_db_id']}. Period logic requires this field."
+            )
 
-    try:
-        all_tasks = client.query_database(_tasks_db_id)
-    except Exception as e:
-        logger.error(f"Failed to fetch tasks for recurring governance: {e}")
-        return
-
-    # Register all RTD pages as examined so Bot Notes are cleared on resolved issues
-    for defn in definitions:
-        mark_page_examined(defn["id"])
-
-    # --- Build map: definition_id -> [open task pages] ---
-    # Excludes completed tasks (status group "Complete") and already-cancelled/skipped tasks
-    # (NON_COMPLETION_STATUSES). Cancelled tasks are not "open" — they're dealt with and
-    # should not be re-processed by the auto-cancel loop on subsequent governance runs.
-    open_tasks_by_def: dict[str, list] = {}
-    for task in all_tasks:
-        series = _get_relation_ids(task, "Recurring Series")
-        if not series:
+        try:
+            definitions = client.query_database(
+                pair["definitions_db_id"],
+                filter_payload={"property": RTD_STATUS_FIELD, "status": {"equals": RTD_ACTIVE_STATUS}},
+            )
+        except Exception as e:
+            logger.error(f"Failed to fetch recurring definitions for pair {pair['definitions_db_id']}: {e}")
             continue
-        if _get_status_group(client, task, "Status") == "Complete":
-            continue
-        if _is_non_completion(_get_status(task, "Status")):
-            continue
-        open_tasks_by_def.setdefault(series[0], []).append(task)
 
-    # --- Per-definition checks ---
-    now = datetime.now().astimezone()
-    for definition in definitions:
-        def_id = definition["id"]
-        def_name = _get_title(definition)
-        cadence_type = _get_select(definition, "Cadence Type")
-        if cadence_type == "N per period":  # legacy name
-            cadence_type = "Exactly N per period"
-        if cadence_type == "At most N per period":  # legacy name
-            cadence_type = "Maximum N per period"
-        cadence_n = _get_number(definition, "N Cadence")
-        period = _get_select(definition, "Period")
-        current_period_key = _period_key(period, now) if period else None
-        open_tasks = open_tasks_by_def.get(def_id, [])
-        anchor_time = _get_text(definition, "Anchor Time")
-        anchor_day_raw = _get_number(definition, "Anchor Day")
-        anchor_day = int(anchor_day_raw) if anchor_day_raw is not None else None
-
-        # --- Anchor Time validation ---
-        # Runs for every RTD so the note appears/clears regardless of whether a task is created.
-        if anchor_time:
-            try:
-                _h, _m = (int(p) for p in anchor_time.strip().split(":"))
-            except Exception:
-                add_bot_note(def_id, RTD_INVALID_ANCHOR_TIME,
-                             f"Anchor Time '{anchor_time}' could not be parsed (expected HH:MM). Due Date set to date only.")
-
-        # --- Grace period: auto-cancel overdue Responsibility tasks ---
-        # Runs before the 0/multiple-open check so cancelled tasks don't count.
-        task_type = _get_select(definition, "Type")
-        if task_type not in {"Habit", "Responsibility", "Bad Habit"}:
-            if task_type and task_type != "None":
-                logger.warning(f"RTD '{def_name}': Type '{task_type}' is unrecognized — skipping.")
-            else:
-                logger.debug(f"RTD '{def_name}': Type is not configured — skipping.")
+        try:
+            all_tasks = client.query_database(pair["tasks_db_id"])
+        except Exception as e:
+            logger.error(f"Failed to fetch tasks for pair {pair['tasks_db_id']}: {e}")
             continue
-        cancelled_ids: set[str] = set()
-        cancelled_tasks: list[dict] = []
-        carried_over_ids: set[str] = set()
-        reconcile_active = _reconcile_period_key or _reconcile_period_target or _reconcile_occurrence_number
-        if task_type == "Responsibility" and not reconcile_active:
-            do_not_autoclose = bool((_get_prop(definition, "Do Not Autoclose") or {}).get("checkbox"))
-            if not do_not_autoclose:
-                grace = _get_number(definition, "Grace Period (days)")
-                if grace is None:
-                    grace = 1  # blank = 1-day grace (one governance cycle after period ends)
-                elif grace < 0:
-                    logger.warning(f"RTD '{def_name}': Grace Period is negative ({grace}) — defaulting to 0.")
-                    grace = 0
-                for task in open_tasks:
+
+        # Register all RTD pages as examined so Bot Notes are cleared on resolved issues
+        for defn in definitions:
+            mark_page_examined(defn["id"])
+
+        # --- Build map: definition_id -> [open task pages] ---
+        # Excludes completed tasks (status group "Complete") and already-cancelled/skipped tasks.
+        # Cancelled tasks are not "open" — they should not be re-processed by auto-cancel.
+        open_tasks_by_def: dict[str, list] = {}
+        for task in all_tasks:
+            series = _get_relation_ids(task, "Recurring Series")
+            if not series:
+                continue
+            if _get_status_group(client, task, "Status") == "Complete":
+                continue
+            if _is_non_completion(_get_status(task, "Status"), pair):
+                continue
+            open_tasks_by_def.setdefault(series[0], []).append(task)
+
+        # --- Per-definition checks ---
+        now = datetime.now().astimezone()
+        for definition in definitions:
+            def_id = definition["id"]
+            def_name = _get_title(definition)
+            cadence_type = _get_select(definition, "Cadence Type")
+            if cadence_type == "N per period":  # legacy name
+                cadence_type = "Exactly N per period"
+            if cadence_type == "At most N per period":  # legacy name
+                cadence_type = "Maximum N per period"
+            cadence_n = _get_number(definition, "N Cadence")
+            period = _get_select(definition, "Period")
+            current_period_key = _period_key(period, now) if period else None
+            open_tasks = open_tasks_by_def.get(def_id, [])
+            anchor_time = _get_text(definition, "Anchor Time")
+            anchor_day_raw = _get_number(definition, "Anchor Day")
+            anchor_day = int(anchor_day_raw) if anchor_day_raw is not None else None
+
+            # --- Anchor Time validation ---
+            # Runs for every RTD so the note appears/clears regardless of whether a task is created.
+            if anchor_time:
+                try:
+                    _h, _m = (int(p) for p in anchor_time.strip().split(":"))
+                except Exception:
+                    add_bot_note(def_id, RTD_INVALID_ANCHOR_TIME,
+                                 f"Anchor Time '{anchor_time}' could not be parsed (expected HH:MM). Due Date set to date only.")
+
+            # --- Grace period: auto-cancel overdue Responsibility tasks ---
+            # Runs before the 0/multiple-open check so cancelled tasks don't count.
+            task_type = _get_select(definition, "Type")
+            if task_type not in {"Habit", "Responsibility", "Bad Habit"}:
+                if task_type and task_type != "None":
+                    logger.warning(f"RTD '{def_name}': Type '{task_type}' is unrecognized — skipping.")
+                else:
+                    logger.debug(f"RTD '{def_name}': Type is not configured — skipping.")
+                continue
+            cancelled_ids: set[str] = set()
+            cancelled_tasks: list[dict] = []
+            carried_over_ids: set[str] = set()
+            reconcile_active = _reconcile_period_key or _reconcile_period_target or _reconcile_occurrence_number
+            if task_type == "Responsibility" and not reconcile_active:
+                do_not_autoclose = bool((_get_prop(definition, "Do Not Autoclose") or {}).get("checkbox"))
+                if not do_not_autoclose:
+                    grace = _get_number(definition, "Grace Period (days)")
+                    if grace is None:
+                        grace = 1  # blank = 1-day grace (one governance cycle after period ends)
+                    elif grace < 0:
+                        logger.warning(f"RTD '{def_name}': Grace Period is negative ({grace}) — defaulting to 0.")
+                        grace = 0
+                    for task in open_tasks:
                         ignore_prop = _get_prop(task, "Ignore Grace Period (Recurring Task)")
                         if ignore_prop and ignore_prop.get("checkbox"):
                             continue
@@ -1125,7 +1207,7 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
                                     if current_period_key:
                                         carry_updates["Period Key (Recurring Task)"] = {"rich_text": [{"type": "text", "text": {"content": current_period_key}}]}
                                     try:
-                                        client.update_page_properties(task["id"], _filter_optional(carry_updates))
+                                        client.update_page_properties(task["id"], _filter_optional(carry_updates, pair))
                                         carried_over_ids.add(task["id"])
                                         logger.info(
                                             f"Carrying forward task '{task_name}' ({task['id']}) for '{def_name}': "
@@ -1144,7 +1226,7 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
                             )
                             close_date = min(_period_end(period, due), yesterday_end).isoformat()
                             cancel_updates = {"Status": {"status": {"name": "Cancelled"}}}
-                            cancel_updates["Closed Date"] = {"date": {"start": close_date}}
+                            cancel_updates[closed_date_field] = {"date": {"start": close_date}}
                             try:
                                 updated = client.update_page_properties(task["id"], cancel_updates)
                                 cancelled_ids.add(task["id"])
@@ -1152,318 +1234,318 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
                             except Exception as e:
                                 logger.error(f"Failed to cancel overdue task {task['id']}: {e}")
 
-        # --- Habit: roll open tasks from a previous period forward to the current period ---
-        # Also bootstraps existing Habit tasks that pre-date the Due Date feature (no Due Date set).
-        if task_type == "Habit" and period and current_period_key and not reconcile_active:
-            for task in open_tasks:
-                due = _get_due_end_or_start(task)
-                task_name = _get_title(task)
-                if due is None:
-                    # Existing task with no Due Date — set current period Due Date without resetting counters.
+            # --- Habit: roll open tasks from a previous period forward to the current period ---
+            # Also bootstraps existing Habit tasks that pre-date the Due Date feature (no Due Date set).
+            if task_type == "Habit" and period and current_period_key and not reconcile_active:
+                for task in open_tasks:
+                    due = _get_due_end_or_start(task)
+                    task_name = _get_title(task)
+                    if due is None:
+                        # Existing task with no Due Date — set current period Due Date without resetting counters.
+                        new_due = _calc_due_date(cadence_type, period, anchor_day, anchor_time, use_next_period=False, task_type=task_type, def_id=def_id, cadence_n=cadence_n)
+                        if new_due:
+                            try:
+                                client.update_page_properties(task["id"], _filter_optional({"Due Date": new_due}, pair))
+                                logger.info(f"Setting initial Due Date on Habit task '{task_name}' ({task['id']}) for '{def_name}'.")
+                            except Exception as e:
+                                logger.error(f"Failed to set Due Date on Habit task {task['id']}: {e}")
+                        continue
+                    if _period_key(period, due) >= current_period_key:
+                        continue  # current or future period — nothing to do
+                    roll_updates: dict = {
+                        "Occurrence # this Period (Recurring Task)": {"number": 1},
+                        "First Due Date": {"date": None},
+                        "Due Date Update Count": {"number": 0},
+                        "Period Key (Recurring Task)": {"rich_text": [{"type": "text", "text": {"content": current_period_key}}]},
+                    }
                     new_due = _calc_due_date(cadence_type, period, anchor_day, anchor_time, use_next_period=False, task_type=task_type, def_id=def_id, cadence_n=cadence_n)
                     if new_due:
-                        try:
-                            client.update_page_properties(task["id"], _filter_optional({"Due Date": new_due}))
-                            logger.info(f"Setting initial Due Date on Habit task '{task_name}' ({task['id']}) for '{def_name}'.")
-                        except Exception as e:
-                            logger.error(f"Failed to set Due Date on Habit task {task['id']}: {e}")
-                    continue
-                if _period_key(period, due) >= current_period_key:
-                    continue  # current or future period — nothing to do
-                roll_updates: dict = {
-                    "Occurrence # this Period (Recurring Task)": {"number": 1},
-                    "First Due Date": {"date": None},
-                    "Due Date Update Count": {"number": 0},
-                    "Period Key (Recurring Task)": {"rich_text": [{"type": "text", "text": {"content": current_period_key}}]},
-                }
-                new_due = _calc_due_date(cadence_type, period, anchor_day, anchor_time, use_next_period=False, task_type=task_type, def_id=def_id, cadence_n=cadence_n)
-                if new_due:
-                    roll_updates["Due Date"] = new_due
-                try:
-                    client.update_page_properties(task["id"], _filter_optional(roll_updates))
-                    carried_over_ids.add(task["id"])
-                    logger.info(f"Rolling forward Habit task '{task_name}' ({task['id']}) for '{def_name}' to current period.")
-                except Exception as e:
-                    logger.error(f"Failed to roll forward Habit task {task['id']}: {e}")
+                        roll_updates["Due Date"] = new_due
+                    try:
+                        client.update_page_properties(task["id"], _filter_optional(roll_updates, pair))
+                        carried_over_ids.add(task["id"])
+                        logger.info(f"Rolling forward Habit task '{task_name}' ({task['id']}) for '{def_name}' to current period.")
+                    except Exception as e:
+                        logger.error(f"Failed to roll forward Habit task {task['id']}: {e}")
 
-        remaining_open = [t for t in open_tasks if t["id"] not in cancelled_ids]
+            remaining_open = [t for t in open_tasks if t["id"] not in cancelled_ids]
 
-        # --- Ensure a task exists for the current period ---
-        # Multiple open tasks across different periods is explicitly allowed (e.g. the user
-        # pre-creates tasks for future periods with their Due Dates filled in advance).
-        # We only create a new task when NO open task covers the current period.
-        if current_period_key:
-            has_current_period_task = any(
-                t["id"] in carried_over_ids
-                or _period_key(period, _get_due_end_or_start(t) or now) == current_period_key
-                for t in remaining_open
-            ) if period else bool(remaining_open)
-        else:
-            # No period defined — any open task counts.
-            has_current_period_task = bool(remaining_open)
+            # --- Ensure a task exists for the current period ---
+            # Multiple open tasks across different periods is explicitly allowed (e.g. the user
+            # pre-creates tasks for future periods with their Due Dates filled in advance).
+            # We only create a new task when NO open task covers the current period.
+            if current_period_key:
+                has_current_period_task = any(
+                    t["id"] in carried_over_ids
+                    or _period_key(period, _get_due_end_or_start(t) or now) == current_period_key
+                    for t in remaining_open
+                ) if period else bool(remaining_open)
+            else:
+                # No period defined — any open task counts.
+                has_current_period_task = bool(remaining_open)
 
-        if not has_current_period_task and not (
-            _reconcile_period_key or _reconcile_period_target or _reconcile_occurrence_number
-        ):
-            # Skip task creation in reconcile mode — reconcile corrects existing tasks only.
-            # Check whether the current period's allotment has already been consumed.
-            # Uses all_tasks (fetched once at the top of this governance pass) for
-            # consistent quota counting across all definitions in a single pass.
-            # Tasks cancelled this pass are excluded via cancelled_ids (they still
-            # appear open in all_tasks since the snapshot predates the pass).
-            force_next = False
-            if period and cadence_type != "Unlimited" and current_period_key:
-                if cadence_type == "Once per period":
-                    n_threshold = 1
-                elif cadence_n is not None and cadence_type in ("Maximum N per period", "Exactly N per period"):
-                    n_threshold = int(cadence_n)
-                else:
-                    n_threshold = None
-                if n_threshold is not None and n_threshold < 1:
-                    logger.warning(
-                        f"RTD '{def_name}': N Cadence={n_threshold} for '{cadence_type}' is < 1 — treating as 1."
-                    )
-                    n_threshold = 1
-                if n_threshold is not None:
-                    # Only completions count — skipped/cancelled tasks are retried,
-                    # not treated as consuming the period quota.
-                    # Exclude cancelled_ids: tasks cancelled in this pass still appear
-                    # open in all_tasks (snapshot taken before the pass), so they must
-                    # be excluded manually to avoid a false force_next=True.
-                    count_all = sum(
-                        1 for t in all_tasks
-                        if def_id in _get_relation_ids(t, "Recurring Series")
-                        and t["id"] not in cancelled_ids
-                        and _task_in_period(t, period, current_period_key)
-                    )
-                    if count_all >= n_threshold:
-                        force_next = True
-                        logger.info(
-                            f"Recurring governance: '{def_name}' current period already has "
-                            f"{count_all} completion(s) — targeting next period."
+            if not has_current_period_task and not (
+                _reconcile_period_key or _reconcile_period_target or _reconcile_occurrence_number
+            ):
+                # Skip task creation in reconcile mode — reconcile corrects existing tasks only.
+                # Check whether the current period's allotment has already been consumed.
+                # Uses all_tasks (fetched once at the top of this governance pass) for
+                # consistent quota counting across all definitions in a single pass.
+                # Tasks cancelled this pass are excluded via cancelled_ids (they still
+                # appear open in all_tasks since the snapshot predates the pass).
+                force_next = False
+                if period and cadence_type != "Unlimited" and current_period_key:
+                    if cadence_type == "Once per period":
+                        n_threshold = 1
+                    elif cadence_n is not None and cadence_type in ("Maximum N per period", "Exactly N per period"):
+                        n_threshold = int(cadence_n)
+                    else:
+                        n_threshold = None
+                    if n_threshold is not None and n_threshold < 1:
+                        logger.warning(
+                            f"RTD '{def_name}': N Cadence={n_threshold} for '{cadence_type}' is < 1 — treating as 1."
                         )
-            logger.info(f"Recurring governance: no open task for '{def_name}' in current period — creating one.")
-            # If this period's task was auto-cancelled, use it as the inheritance source.
-            # Pick the cancelled task with the most recent Due Date as the reference.
-            ref_task = max(cancelled_tasks, key=lambda t: _get_due_end_or_start(t) or now) if cancelled_tasks else None
-            # If no auto-cancelled task is available (e.g. the task was closed Done before
-            # governance ran), fall back to the most recently completed task so field
-            # inheritance still occurs — consistent with the live-poll completion path.
-            if ref_task is None:
-                done_tasks = [
+                        n_threshold = 1
+                    if n_threshold is not None:
+                        # Only completions count — skipped/cancelled tasks are retried,
+                        # not treated as consuming the period quota.
+                        # Exclude cancelled_ids: tasks cancelled in this pass still appear
+                        # open in all_tasks (snapshot taken before the pass), so they must
+                        # be excluded manually to avoid a false force_next=True.
+                        count_all = sum(
+                            1 for t in all_tasks
+                            if def_id in _get_relation_ids(t, "Recurring Series")
+                            and t["id"] not in cancelled_ids
+                            and _task_in_period(t, period, current_period_key)
+                        )
+                        if count_all >= n_threshold:
+                            force_next = True
+                            logger.info(
+                                f"Recurring governance: '{def_name}' current period already has "
+                                f"{count_all} completion(s) — targeting next period."
+                            )
+                logger.info(f"Recurring governance: no open task for '{def_name}' in current period — creating one.")
+                # If this period's task was auto-cancelled, use it as the inheritance source.
+                # Pick the cancelled task with the most recent Due Date as the reference.
+                ref_task = max(cancelled_tasks, key=lambda t: _get_due_end_or_start(t) or now) if cancelled_tasks else None
+                # If no auto-cancelled task is available (e.g. the task was closed Done before
+                # governance ran), fall back to the most recently completed task so field
+                # inheritance still occurs — consistent with the live-poll completion path.
+                if ref_task is None:
+                    done_tasks = [
+                        t for t in all_tasks
+                        if def_id in _get_relation_ids(t, "Recurring Series")
+                        and not _is_open(t)
+                        and not _is_non_completion(_get_status(t, "Status"), pair)
+                    ]
+                    if done_tasks:
+                        ref_task = max(done_tasks, key=lambda t: _get_due_end_or_start(t) or now)
+                new_page = _create_next_task(client, ref_task, definition, pair, force_next_period=force_next)
+                if new_page:
+                    created_pages.append(new_page)
+
+            # --- Correct Period Key, Occurrence #, and Period Target ---
+            expected_target = _build_period_target(cadence_type, cadence_n, period)
+
+            if _reconcile_period_key or _reconcile_period_target or _reconcile_occurrence_number:
+                # Retroactive reconcile: process ALL tasks for this definition (open, closed,
+                # cancelled). Groups by period, then assigns Occurrence # using a counter that
+                # only decrements for non-cancelled tasks — so cancelled tasks share the slot
+                # number of the next non-cancelled task (same occurrence, failed attempt).
+                all_for_def = [t for t in all_tasks if def_id in _get_relation_ids(t, "Recurring Series")]
+
+                def _task_pk(task: dict) -> str:
+                    closed = _get_date(task, "Closed Date")
+                    if closed and period:
+                        return _period_key(period, _parse_closed_dt(closed) or now)
+                    due_dt = _get_due_end_or_start(task)
+                    if due_dt and period:
+                        return _period_key(period, due_dt)
+                    return current_period_key or ""
+
+                # Group ALL tasks by period.
+                tasks_by_period: dict[str, list] = {}
+                for task in all_for_def:
+                    tasks_by_period.setdefault(_task_pk(task), []).append(task)
+
+                for group_pk, group_tasks in tasks_by_period.items():
+                    # Sort oldest-first by Closed Date (if set), otherwise Due Date end (or start).
+                    # Using Due Date end ensures open tasks sort after any cancelled tasks that share
+                    # the same period slot, keeping Occurrence # stable across governance passes.
+                    # Tasks with neither date go at the end in arbitrary order.
+                    # Occurrence # starts at 1 and increments only for non-cancelled tasks,
+                    # so a cancelled task shares the same slot number as the task that follows it.
+                    def _occ_sort_key(t: dict) -> tuple:
+                        closed = _get_date(t, "Closed Date")
+                        if closed:
+                            return (0, closed)
+                        due_dt = _get_due_end_or_start(t)
+                        return (0, due_dt.isoformat()) if due_dt else (1, "")
+
+                    is_cancelled_fn = lambda t: _is_non_completion(_get_status(t, "Status"), pair)
+                    ordered = sorted(group_tasks, key=_occ_sort_key)
+                    current_occurrence = 1
+
+                    for task in ordered:
+                        task_cancelled = is_cancelled_fn(task)
+                        rec_updates: dict = {}
+                        if _reconcile_period_key and group_pk:
+                            rec_updates["Period Key (Recurring Task)"] = {
+                                "rich_text": [{"type": "text", "text": {"content": group_pk}}]
+                            }
+                        if _reconcile_occurrence_number:
+                            rec_updates["Occurrence # this Period (Recurring Task)"] = {"number": current_occurrence}
+                        if _reconcile_period_target and expected_target:
+                            rec_updates["Period Target (Recurring Task)"] = {
+                                "rich_text": [{"type": "text", "text": {"content": expected_target}}]
+                            }
+                        rec_updates = _filter_optional(rec_updates, pair)
+                        if rec_updates:
+                            label = "cancelled " if task_cancelled else ""
+                            logger.info(
+                                f"Reconcile {label}'{def_name}' task {task['id']}: "
+                                f"Period Key={group_pk!r}, Occurrence#={current_occurrence}, "
+                                f"Period Target={expected_target!r}"
+                            )
+                            try:
+                                client.update_page_properties(task["id"], rec_updates)
+                            except Exception as e:
+                                logger.error(f"Reconcile: failed to update task {task['id']}: {e}")
+                        if not task_cancelled:
+                            current_occurrence += 1
+
+            else:
+                # Normal governance: drift-correct all tasks in the current and future periods
+                # (open, closed, and cancelled). Historical periods are left untouched.
+                # Uses the same oldest-first / increment-for-non-cancelled Occurrence # logic
+                # as --reconcile, but only writes when a value has actually drifted.
+                # This means RTD config changes (Period, Cadence Type, N) take effect on the
+                # next governance run without needing --reconcile.
+                # Exclude carried_over_ids: their Due Date in all_tasks is stale (pre-carry-over),
+                # so _gov_task_pk would compute the old period key and overwrite the corrected fields.
+                all_for_def = [
                     t for t in all_tasks
                     if def_id in _get_relation_ids(t, "Recurring Series")
-                    and not _is_open(t)
-                    and not _is_non_completion(_get_status(t, "Status"))
+                    and t["id"] not in carried_over_ids
                 ]
-                if done_tasks:
-                    ref_task = max(done_tasks, key=lambda t: _get_due_end_or_start(t) or now)
-            new_page = _create_next_task(client, ref_task, definition, force_next_period=force_next)
-            if new_page:
-                created_pages.append(new_page)
 
-        # --- Correct Period Key, Occurrence #, and Period Target ---
-        expected_target = _build_period_target(cadence_type, cadence_n, period)
+                def _gov_task_pk(task: dict) -> str:
+                    closed = _get_date(task, "Closed Date")
+                    if closed and period:
+                        return _period_key(period, _parse_closed_dt(closed) or now)
+                    due_dt = _get_due_end_or_start(task)
+                    if due_dt and period:
+                        return _period_key(period, due_dt)
+                    return current_period_key or ""
 
-        if _reconcile_period_key or _reconcile_period_target or _reconcile_occurrence_number:
-            # Retroactive reconcile: process ALL tasks for this definition (open, closed,
-            # cancelled). Groups by period, then assigns Occurrence # using a counter that
-            # only decrements for non-cancelled tasks — so cancelled tasks share the slot
-            # number of the next non-cancelled task (same occurrence, failed attempt).
-            all_for_def = [t for t in all_tasks if def_id in _get_relation_ids(t, "Recurring Series")]
+                tasks_by_period: dict[str, list] = {}
+                for task in all_for_def:
+                    pk = _gov_task_pk(task)
+                    # Only include current and future periods; skip historical closed tasks.
+                    if current_period_key and pk and pk < current_period_key:
+                        continue
+                    tasks_by_period.setdefault(pk, []).append(task)
 
-            def _task_pk(task: dict) -> str:
-                closed = _get_date(task, "Closed Date")
-                if closed and period:
-                    return _period_key(period, _parse_closed_dt(closed) or now)
-                due_dt = _get_due_end_or_start(task)
-                if due_dt and period:
-                    return _period_key(period, due_dt)
-                return current_period_key or ""
-
-            # Group ALL tasks by period.
-            tasks_by_period: dict[str, list] = {}
-            for task in all_for_def:
-                tasks_by_period.setdefault(_task_pk(task), []).append(task)
-
-            for group_pk, group_tasks in tasks_by_period.items():
-                # Sort oldest-first by Closed Date (if set), otherwise Due Date end (or start).
-                # Using Due Date end ensures open tasks sort after any cancelled tasks that share
-                # the same period slot, keeping Occurrence # stable across governance passes.
-                # Tasks with neither date go at the end in arbitrary order.
-                # Occurrence # starts at 1 and increments only for non-cancelled tasks,
-                # so a cancelled task shares the same slot number as the task that follows it.
-                def _occ_sort_key(t: dict) -> tuple:
+                def _gov_sort_key(t: dict) -> tuple:
                     closed = _get_date(t, "Closed Date")
                     if closed:
                         return (0, closed)
                     due_dt = _get_due_end_or_start(t)
                     return (0, due_dt.isoformat()) if due_dt else (1, "")
 
-                is_cancelled_fn = lambda t: _is_non_completion(_get_status(t, "Status"))
-                ordered = sorted(group_tasks, key=_occ_sort_key)
-                current_occurrence = 1
-
-                for task in ordered:
-                    task_cancelled = is_cancelled_fn(task)
-                    rec_updates: dict = {}
-                    if _reconcile_period_key and group_pk:
-                        rec_updates["Period Key (Recurring Task)"] = {
-                            "rich_text": [{"type": "text", "text": {"content": group_pk}}]
-                        }
-                    if _reconcile_occurrence_number:
-                        rec_updates["Occurrence # this Period (Recurring Task)"] = {"number": current_occurrence}
-                    if _reconcile_period_target and expected_target:
-                        rec_updates["Period Target (Recurring Task)"] = {
-                            "rich_text": [{"type": "text", "text": {"content": expected_target}}]
-                        }
-                    rec_updates = _filter_optional(rec_updates)
-                    if rec_updates:
-                        label = "cancelled " if task_cancelled else ""
-                        logger.info(
-                            f"Reconcile {label}'{def_name}' task {task['id']}: "
-                            f"Period Key={group_pk!r}, Occurrence#={current_occurrence}, "
-                            f"Period Target={expected_target!r}"
-                        )
-                        try:
-                            client.update_page_properties(task["id"], rec_updates)
-                        except Exception as e:
-                            logger.error(f"Reconcile: failed to update task {task['id']}: {e}")
-                    if not task_cancelled:
-                        current_occurrence += 1
-
-        else:
-            # Normal governance: drift-correct all tasks in the current and future periods
-            # (open, closed, and cancelled). Historical periods are left untouched.
-            # Uses the same oldest-first / increment-for-non-cancelled Occurrence # logic
-            # as --reconcile, but only writes when a value has actually drifted.
-            # This means RTD config changes (Period, Cadence Type, N) take effect on the
-            # next governance run without needing --reconcile.
-            # Exclude carried_over_ids: their Due Date in all_tasks is stale (pre-carry-over),
-            # so _gov_task_pk would compute the old period key and overwrite the corrected fields.
-            all_for_def = [
-                t for t in all_tasks
-                if def_id in _get_relation_ids(t, "Recurring Series")
-                and t["id"] not in carried_over_ids
-            ]
-
-            def _gov_task_pk(task: dict) -> str:
-                closed = _get_date(task, "Closed Date")
-                if closed and period:
-                    return _period_key(period, _parse_closed_dt(closed) or now)
-                due_dt = _get_due_end_or_start(task)
-                if due_dt and period:
-                    return _period_key(period, due_dt)
-                return current_period_key or ""
-
-            tasks_by_period: dict[str, list] = {}
-            for task in all_for_def:
-                pk = _gov_task_pk(task)
-                # Only include current and future periods; skip historical closed tasks.
-                if current_period_key and pk and pk < current_period_key:
-                    continue
-                tasks_by_period.setdefault(pk, []).append(task)
-
-            def _gov_sort_key(t: dict) -> tuple:
-                closed = _get_date(t, "Closed Date")
-                if closed:
-                    return (0, closed)
-                due_dt = _get_due_end_or_start(t)
-                return (0, due_dt.isoformat()) if due_dt else (1, "")
-
-            is_cancelled_fn = lambda t: (
-                t["id"] in cancelled_ids
-                or _is_non_completion(_get_status(t, "Status"))
-            )
-
-            for group_pk, group_tasks in tasks_by_period.items():
-                ordered = sorted(group_tasks, key=_gov_sort_key)
-                current_occurrence = 1
-
-                for task in ordered:
-                    task_cancelled = is_cancelled_fn(task)
-                    current_instance = _get_number(task, "Occurrence # this Period (Recurring Task)")
-                    current_pk = (_get_text(task, "Period Key (Recurring Task)") or "").strip() or None
-                    current_target = (_get_text(task, "Period Target (Recurring Task)") or "").strip() or None
-
-                    drift_updates: dict = {}
-                    if group_pk and current_pk != group_pk:
-                        logger.info(
-                            f"Governance: correcting Period Key on {task['id']} for '{def_name}': "
-                            f"{current_pk!r} → {group_pk!r}"
-                        )
-                        drift_updates["Period Key (Recurring Task)"] = {
-                            "rich_text": [{"type": "text", "text": {"content": group_pk}}]
-                        }
-                    if current_instance != current_occurrence:
-                        logger.info(
-                            f"Governance: correcting Occurrence # on {task['id']} for '{def_name}': "
-                            f"{current_instance} → {current_occurrence}"
-                        )
-                        drift_updates["Occurrence # this Period (Recurring Task)"] = {"number": current_occurrence}
-                    if expected_target and current_target != expected_target:
-                        logger.info(
-                            f"Governance: correcting Period Target on {task['id']} for '{def_name}': "
-                            f"{current_target!r} → {expected_target!r}"
-                        )
-                        drift_updates["Period Target (Recurring Task)"] = {
-                            "rich_text": [{"type": "text", "text": {"content": expected_target}}]
-                        }
-                    if drift_updates:
-                        try:
-                            client.update_page_properties(task["id"], _filter_optional(drift_updates))
-                        except Exception as e:
-                            logger.error(f"Failed to correct task {task['id']}: {e}")
-
-                    if not task_cancelled:
-                        current_occurrence += 1
-
-        # --- Maximum alert (breach only — count == N is the happy path) ---
-        if cadence_type == "Maximum N per period" and cadence_n is not None:
-            count = _count_tasks_in_period_from_list(all_tasks, def_id, period, current_period_key)
-            if count > int(cadence_n):
-                add_bot_note(
-                    def_id,
-                    RTD_AT_MOST_N_REACHED,
-                    f"'Maximum per period' cap of {int(cadence_n)} exceeded "
-                    f"({count} task(s) exist this period). Manual cleanup needed.",
+                is_cancelled_fn = lambda t: (
+                    t["id"] in cancelled_ids
+                    or _is_non_completion(_get_status(t, "Status"), pair)
                 )
-                logger.info(f"At-most-N cap exceeded for '{def_name}': {count}/{int(cadence_n)}")
 
-        # --- Exactly N alert (completions exceeded N — unexpected; force_next should prevent this) ---
-        if cadence_type == "Exactly N per period" and cadence_n is not None and current_period_key:
-            completion_count = sum(
-                1 for t in all_tasks
-                if def_id in _get_relation_ids(t, "Recurring Series")
-                and _task_in_period(t, period, current_period_key)
-            )
-            if completion_count > int(cadence_n):
-                add_bot_note(
-                    def_id,
-                    RTD_EXACTLY_N_EXCEEDED,
-                    f"'Exactly N per period' target of {int(cadence_n)} exceeded "
-                    f"({completion_count} completion(s) this period). Manual cleanup may be needed.",
-                )
-                logger.info(f"Exactly-N exceeded for '{def_name}': {completion_count}/{int(cadence_n)}")
+                for group_pk, group_tasks in tasks_by_period.items():
+                    ordered = sorted(group_tasks, key=_gov_sort_key)
+                    current_occurrence = 1
 
-        # --- Write Current Period to the RTD ---
-        # Governance writes a Date (start + end) representing the current period boundary
-        # to the `Current Period` field on the RTD, if the field exists. Enables Notion
-        # formulas and Siri Shortcuts to filter tasks by period without computing boundaries.
-        if period and current_period_key and "Current Period" in definition.get("properties", {}):
-            adjusted_now = _period_dt(now)
-            cp_start, _ = _period_dates(period, None, False, adjusted_now)
-            cp_start_dt = cp_start + timedelta(hours=_day_start_hour)
-            cp_next, _ = _period_dates(period, None, True, cp_start)
-            cp_end_dt = cp_next + timedelta(hours=_day_start_hour) - timedelta(minutes=1)
-            try:
-                client.update_page_properties(
-                    def_id,
-                    {"Current Period": {"date": {"start": cp_start_dt.isoformat(), "end": cp_end_dt.isoformat()}}},
+                    for task in ordered:
+                        task_cancelled = is_cancelled_fn(task)
+                        current_instance = _get_number(task, "Occurrence # this Period (Recurring Task)")
+                        current_pk = (_get_text(task, "Period Key (Recurring Task)") or "").strip() or None
+                        current_target = (_get_text(task, "Period Target (Recurring Task)") or "").strip() or None
+
+                        drift_updates: dict = {}
+                        if group_pk and current_pk != group_pk:
+                            logger.info(
+                                f"Governance: correcting Period Key on {task['id']} for '{def_name}': "
+                                f"{current_pk!r} → {group_pk!r}"
+                            )
+                            drift_updates["Period Key (Recurring Task)"] = {
+                                "rich_text": [{"type": "text", "text": {"content": group_pk}}]
+                            }
+                        if current_instance != current_occurrence:
+                            logger.info(
+                                f"Governance: correcting Occurrence # on {task['id']} for '{def_name}': "
+                                f"{current_instance} → {current_occurrence}"
+                            )
+                            drift_updates["Occurrence # this Period (Recurring Task)"] = {"number": current_occurrence}
+                        if expected_target and current_target != expected_target:
+                            logger.info(
+                                f"Governance: correcting Period Target on {task['id']} for '{def_name}': "
+                                f"{current_target!r} → {expected_target!r}"
+                            )
+                            drift_updates["Period Target (Recurring Task)"] = {
+                                "rich_text": [{"type": "text", "text": {"content": expected_target}}]
+                            }
+                        if drift_updates:
+                            try:
+                                client.update_page_properties(task["id"], _filter_optional(drift_updates, pair))
+                            except Exception as e:
+                                logger.error(f"Failed to correct task {task['id']}: {e}")
+
+                        if not task_cancelled:
+                            current_occurrence += 1
+
+            # --- Maximum alert (breach only — count == N is the happy path) ---
+            if cadence_type == "Maximum N per period" and cadence_n is not None:
+                count = _count_tasks_in_period_from_list(all_tasks, def_id, period, current_period_key)
+                if count > int(cadence_n):
+                    add_bot_note(
+                        def_id,
+                        RTD_AT_MOST_N_REACHED,
+                        f"'Maximum per period' cap of {int(cadence_n)} exceeded "
+                        f"({count} task(s) exist this period). Manual cleanup needed.",
+                    )
+                    logger.info(f"At-most-N cap exceeded for '{def_name}': {count}/{int(cadence_n)}")
+
+            # --- Exactly N alert (completions exceeded N — unexpected; force_next should prevent this) ---
+            if cadence_type == "Exactly N per period" and cadence_n is not None and current_period_key:
+                completion_count = sum(
+                    1 for t in all_tasks
+                    if def_id in _get_relation_ids(t, "Recurring Series")
+                    and _task_in_period(t, period, current_period_key)
                 )
-                logger.debug(f"Updated Current Period on RTD '{def_name}'.")
-            except Exception as e:
-                logger.error(f"Failed to update Current Period on RTD '{def_name}': {e}")
+                if completion_count > int(cadence_n):
+                    add_bot_note(
+                        def_id,
+                        RTD_EXACTLY_N_EXCEEDED,
+                        f"'Exactly N per period' target of {int(cadence_n)} exceeded "
+                        f"({completion_count} completion(s) this period). Manual cleanup may be needed.",
+                    )
+                    logger.info(f"Exactly-N exceeded for '{def_name}': {completion_count}/{int(cadence_n)}")
+
+            # --- Write Current Period to the RTD ---
+            # Governance writes a Date (start + end) representing the current period boundary
+            # to the `Current Period` field on the RTD, if the field exists. Enables Notion
+            # formulas and Siri Shortcuts to filter tasks by period without computing boundaries.
+            if period and current_period_key and "Current Period" in definition.get("properties", {}):
+                adjusted_now = _period_dt(now)
+                cp_start, _ = _period_dates(period, None, False, adjusted_now)
+                cp_start_dt = cp_start + timedelta(hours=_day_start_hour)
+                cp_next, _ = _period_dates(period, None, True, cp_start)
+                cp_end_dt = cp_next + timedelta(hours=_day_start_hour) - timedelta(minutes=1)
+                try:
+                    client.update_page_properties(
+                        def_id,
+                        {"Current Period": {"date": {"start": cp_start_dt.isoformat(), "end": cp_end_dt.isoformat()}}},
+                    )
+                    logger.debug(f"Updated Current Period on RTD '{def_name}'.")
+                except Exception as e:
+                    logger.error(f"Failed to update Current Period on RTD '{def_name}': {e}")
 
     logger.info("Recurring task governance complete.")
     return created_pages
@@ -1481,10 +1563,12 @@ def auto_recurring_tasks(client: "NotionClient", page: dict, prev_page: dict | N
     Also initializes Period Key, Instance #, Period Target, and Due Date on tasks
     that are linked to a series but were never stamped by the bot.
     """
-    if not _definitions_db_id:
+    tasks_db_id = page.get("parent", {}).get("database_id", "").replace("-", "")
+    pair = _pair_by_tasks_db.get(tasks_db_id)
+    if pair is None:
         return {}
 
-    _load_task_db_schema(client)
+    _load_task_db_schema(client, pair)
 
     series_ids = _get_relation_ids(page, "Recurring Series")
     if not series_ids:
@@ -1508,9 +1592,9 @@ def auto_recurring_tasks(client: "NotionClient", page: dict, prev_page: dict | N
     # guard in _create_next_task prevents double-creation when governance already
     # created a replacement in the same pass (e.g. auto-cancel of an overdue task).
     if prev_page is not None and current_group == "Complete" and prev_group != "Complete":
-        action = "cancelled" if _is_non_completion(_get_status(page, "Status")) else "completed"
+        action = "cancelled" if _is_non_completion(_get_status(page, "Status"), pair) else "completed"
         logger.info(f"Recurring task {page['id']} {action} — creating next task.")
-        new_page = _create_next_task(client, page, definition)
+        new_page = _create_next_task(client, page, definition, pair)
         created = [new_page] if new_page is not None else []
         return {BOT_CREATED_PAGES_KEY: created}
 
@@ -1547,7 +1631,7 @@ def auto_recurring_tasks(client: "NotionClient", page: dict, prev_page: dict | N
                 else:
                     logger.debug(f"RTD '{_get_title(definition)}': Type is not configured — skipping initialization.")
                 return {}
-            count = _count_tasks_in_period(client, definition["id"], period, current_pk)
+            count = _count_tasks_in_period(client, definition["id"], period, current_pk, pair)
             updates: dict = {"Occurrence # this Period (Recurring Task)": {"number": count + 1}}
             if current_pk:
                 updates["Period Key (Recurring Task)"] = {"rich_text": [{"type": "text", "text": {"content": current_pk}}]}
@@ -1561,7 +1645,7 @@ def auto_recurring_tasks(client: "NotionClient", page: dict, prev_page: dict | N
                 if due_date:
                     updates["Due Date"] = due_date
 
-            updates = _filter_optional(updates)
+            updates = _filter_optional(updates, pair)
             logger.info(f"Initializing uninitialized recurring task {page['id']}: {list(updates.keys())}")
             return updates
 
@@ -1577,6 +1661,6 @@ def auto_recurring_tasks(client: "NotionClient", page: dict, prev_page: dict | N
         current_target = _get_text(page, "Period Target (Recurring Task)")
         if expected_target and expected_target != current_target:
             logger.info(f"Syncing Period Target on {page['id']}: {current_target!r} → {expected_target!r}")
-            return _filter_optional({"Period Target (Recurring Task)": {"rich_text": [{"type": "text", "text": {"content": expected_target}}]}})
+            return _filter_optional({"Period Target (Recurring Task)": {"rich_text": [{"type": "text", "text": {"content": expected_target}}]}}, pair)
 
     return {}

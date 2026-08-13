@@ -6,106 +6,18 @@ Living design document. Sections are deleted when a feature is implemented and i
 
 ## Contents
 
-- [Extended Cadence (Every Y Periods)](#feature-extended-cadence-every-y-periods)
-- [Snapshot Pruning / Deleted Page Detection](#improvement-snapshot-pruning--deleted-page-detection)
-- [Governance Schema Validation](#improvement-governance-schema-validation)
-- [Schema-Check Safety Net in automations.py](#improvement-schema-check-safety-net-in-automationspy)
-- [Minimum N — Carry-Over Instead of Archive](#improvement-minimum-n-per-period--carry-over-instead-of-archive)
-- [Configurable Field Inheritance](#feature-configurable-field-inheritance-for-recurring-tasks)
-- [Automation Hub](#automation-hub-formerly-project-page)
-- [Notifications](#notifications)
-- [Clear Blocking/Blocked-By on Close](#clear-blockingblocked-by-on-close)
-- [Cumulative Overdue Time Tracking](#improvement-cumulative-overdue-time-tracking)
-- [RTD Current Period Field](#improvement-rtd-current-period-field)
-- [Timer / Mission Tracking](#timer--mission-tracking)
+- [Improvement: Snapshot Pruning / Deleted Page Detection](#improvement--snapshot-pruning---deleted-page-detection)
+- [Improvement: Governance Schema Validation](#improvement--governance-schema-validation)
+- [Improvement: Schema-Check Safety Net in automations.py](#improvement--schema-check-safety-net-in-automations-py)
+- [Improvement: Minimum N Per Period — Carry-Over Instead of Archive](#improvement--minimum-n-per-period---carry-over-instead-of-archive)
+- [Feature: Configurable Field Inheritance for Recurring Tasks](#feature--configurable-field-inheritance-for-recurring-tasks)
+- [Automation Hub (formerly "Project Page")](#automation-hub--formerly--project-page)
+- [Clear Blocking/Blocked-By on Close](#clear-blocking-blocked-by-on-close)
 - [Automated Testing](#automated-testing)
-- [Bulk Edit Tool](#bulk-edit-tool-tools)
+- [Bulk Edit Tool (tools/)](#bulk-edit-tool--tools)
 - [Habit Due Dates with Rolling Forward](#habit-due-dates-with-rolling-forward)
-- [Companion: Siri Shortcuts Integration](#companion-siri-shortcuts-integration)
-- [Range Cadence (At Least N, At Most M)](#range-cadence-at-least-n-at-most-m)
-- [Task Templates](#task-templates)
 
----
-
-## Feature: Extended Cadence (Every Y Periods)
-
-**Status:** Pre-design
-**One-liner:** Support recurring cadences spanning multiple periods (bi-weekly, quarterly, etc.) with a simplified picker for common cadences and a Custom mode for arbitrary X-per-Y configurations.
-
-### Use cases
-- Bi-weekly therapy prep task (1 per 2 weeks)
-- Quarterly oil change (1 per quarter)
-- "3 wrestling tournaments per year" already works today — Exactly N=3, Period=Year
-
-### Fields added / changed
-
-| #   | Field                                 | Type      | Change                      | Notes                                                                                                                                             |
-| -----| ---------------------------------------| -----------| -----------------------------| ---------------------------------------------------------------------------------------------------------------------------------------------------|
-| 1   | Condition                             | Select    | New (replaces Cadence Type) | `Every` / `Minimum` / `Maximum` / `Unlimited`                                                                                                     |
-| 2   | Cadence                               | Select    | New                         | `Every Day` / `Every Week` / `Every 2 Weeks` / `Every Month` / `Every Quarter` / `Every Year` / `Custom`                                          |
-| 3   | X (Custom Cadence)                    | Number    | Rename from `N Cadence`     | Task count per Y periods. Only read when Cadence=Custom.                                                                                          |
-| 4   | Y (Custom Cadence)                    | Number    | New                         | Period multiplier. Only read when Cadence=Custom.                                                                                                 |
-| 5   | Period (Custom Cadence)               | Select    | Rename from `Period`        | Day / Week / Month / Quarter / Year. Only read when Cadence=Custom.                                                                               |
-| 6   | Cadence (Display)                     | Rich Text | New                         | Bot-written each governance run. Human-readable full cadence string (e.g. "Minimum 1 every 2 weeks"). Like Period Target on tasks — display only. |
-| 7   | Current Period Start (Custom Cadence) | Date      | New                         | Bot advances on each new period; user can edit to shift window boundaries. Only meaningful when Y > 1.                                            |
-
-Net-new fields: **3** (Y, Cadence (Display), Current Period Start). Fields 3 and 5 are renames of existing fields.
-
-### Field interaction model
-
-- **Condition=Unlimited**: no cap, no minimum — create a task whenever the prior completes. Bot ignores X, Y, Cadence. Use case: log bad habit occurrences without a period cap. If used with a non-Bad-Habit RTD, log a warning and treat as Every.
-- **Cadence=simple option** (not Custom): X implicitly = 1, Y implicitly = 1, Period derived from the selected option. Custom fields (X, Y, Period) are ignored.
-- **Cadence=Custom**: reads X, Y, Period (Custom Cadence) fields.
-- **Condition applies to both simple and Custom cadences.** "Minimum 1 every 2 weeks" = Condition: Minimum + Cadence: Custom, X=1, Y=2, Period=Week.
-- **Quarter** added as a first-class Period option alongside Day, Week, Month, Year.
-
-### Default values and validation
-
-| Field                   | Invalid / Missing         | Action                                                  |
-| -------------------------| ---------------------------| ---------------------------------------------------------|
-| Condition               | Empty or unknown value    | Default to `Every`; log WARNING; surface to Hub         |
-| Cadence                 | Empty or unknown value    | Log ERROR, skip RTD this governance run; surface to Hub |
-| X (Custom Cadence)      | Empty when Cadence=Custom | Default to 1; log WARNING                               |
-| X (Custom Cadence)      | ≤ 0                       | Default to 1; log WARNING                               |
-| Y (Custom Cadence)      | Empty when Cadence=Custom | Default to 1; log WARNING                               |
-| Y (Custom Cadence)      | ≤ 0                       | Default to 1; log WARNING                               |
-| Period (Custom Cadence) | Empty when Cadence=Custom | Log ERROR, skip RTD this governance run; surface to Hub |
-| Current Period Start    | Future date               | Log ERROR, skip RTD this governance run; surface to Hub |
-| Current Period Start    | Empty on first activation | Bot writes today as the initial anchor                  |
-
-Default-value behavior follows the same pattern as existing RTD field defaults (Grace Period, Anchor Day, etc.) — warn and continue where possible; skip and surface where the field is required for correct behavior.
-
-### Period key computation for Y > 1
-
-- Bot steps forward from Current Period Start in increments of `Y × period_length` to find the window containing today.
-- When `today >= Current Period Start + Y × period_length`, bot advances Current Period Start by one interval and creates the next task.
-- Period key format: extend `_period_key()` to embed Y (e.g. `W2-2026-05-19` for a 2-week window starting May 19).
-
-### Decisions made so far
-- **Unlimited in Condition, not Cadence.** Cadence answers "how often?" — all values are period-based. Condition answers "what's the enforcement rule?" — Unlimited fits there.
-- **Current Period Start: future date = halt + Hub warning.** Backward extrapolation would be silent and surprising. The current period must contain today by definition.
-- **Single Current Period Start field** (not two). Bot advances it forward each new period; user can edit mid-period to shift future boundaries. Field description on hover explains the dual role.
-- **Cadence (Display)** bot-written on each governance run.
-- **Quarter** added as first-class Period option.
-
-### Open questions
-- **Anchor Day for Year period**: does `_calc_due_date` currently handle it? Verify before designing behavior for Cadence=Custom + Period=Year + Anchor Day set.
-- **Cadence (Display) write frequency**: every governance run (simple, slightly more API writes) or only on detected change (requires diffing)?
-- **Condition=Unlimited + Cadence interaction**: if Cadence is still set when Condition=Unlimited, does the bot use it to determine how often to create a new tracking task, or fully ignore it? Needs decision.
-
-### Migration
-Breaking changes: Cadence Type → split into Condition + Cadence (select option values change). `N Cadence` → `X (Custom Cadence)`. `Period` → `Period (Custom Cadence)`.
-
-Requires a migration script in `tools/` before shipping:
-1. Read each RTD row: Cadence Type, N Cadence, Period values.
-2. Map to new Condition + Cadence + X + Y + Period. RTDs with N=1 → simple Cadence option. RTDs with N>1 → Cadence=Custom, X=N, Y=1.
-3. Write CSV backup of old values before any writes.
-4. Apply new values.
-
-### Dependencies
-- Governance Schema Validation (PLANNED) — add new fields to the validation table once implemented.
-- RTD Optional Fields Default Handling (PLANNED) — new fields need the same treatment.
-- Automation Hub — Current Period Start future-date warning surfaces in Hub Section 2.
+- [Undeveloped Ideas](#undeveloped-ideas)
 
 ---
 
@@ -219,8 +131,8 @@ In `run_recurring_governance`, replace the `archive_page()` call for the "minimu
 
 ## Feature: Configurable Field Inheritance for Recurring Tasks
 
-**Status:** Pre-design (P3 bug fixed; configurable inheritance is an Automation Hub feature)
-**One-liner:** Let users control which fields are inherited when a recurring task is created — inclusive (whitelist) or exclusive (blacklist) — without touching code or config files.
+**Status:** In design (whitelist approach chosen; lives in Hub Section 2)
+**One-liner:** Let users control which fields are inherited when a recurring task is created using a whitelist — without touching code or config files.
 
 ### What was fixed (P3)
 Root cause of inheritance failures was never `_copy_task_fields` logic — fields were being copied correctly. Failures came from API rejections on `create_page`:
@@ -228,34 +140,41 @@ Root cause of inheritance failures was never `_copy_task_fields` logic — field
 - `people` type properties → read format includes full user objects (`name`, `avatar_url`, etc.); write format only accepts `{"id": "..."}`. Fixed: `_copy_task_fields` now strips people entries to ID only.
 - Graceful fallback added: if `create_page` with inherited fields fails, log a WARNING (always visible) with Notion's error message, then retry with bot-managed fields only — task is always created.
 
+### Code cleanup (pending, independent of Hub)
+Two fields should be added to `FIELDS_NOT_INHERITED` in `recurring_tasks.py` regardless of the Hub feature:
+- `"Name"` — already overwritten by `base_props` on every task creation; adding it makes the exclusion explicit and avoids a pointless copy.
+- `"Primary Tasks (Relationship)"` and `"Secondary Tasks (Relationship)"` — back-relations to the Task Relationships database. Currently inherited, which would link the new task to the same relationship entries as the closed task. Relationships are task-instance-specific and must never carry forward.
+
 ### Configurable inheritance design (Automation Hub)
 
-This belongs in the **Automation Hub**, not `config.toml`. Reasoning:
-- Field inheritance is a schema-aware behavioral decision ("I added a column — should it be inherited?").
+This belongs in **Hub Section 2 (Recurring Tasks)**, not `config.toml` and not Hub Section 1. Reasoning:
+- Field inheritance is a recurring-task-creation concern, not a general per-database automation flag.
 - Users should be able to reconfigure without restarting the daemon.
-- `config.toml` is for workspace identity and connectivity (token, DB IDs). Behavioral schema decisions live in Automation Hub.
+- `config.toml` is for workspace identity and connectivity (token, DB IDs). Behavioral schema decisions live in the Hub.
 
-Two variables, configured per task database in the Automation Hub:
+**Approach: whitelist (inclusive) only.** The blacklist failure mode (wrong data silently inherited) is worse than the whitelist failure mode (missing data, visibly empty). A field not listed is simply not inherited — safe default. No Inheritance Mode toggle needed.
 
+Configured in Hub Section 2 as a text field:
 ```
-Inheritance Mode: Inclusive | Exclusive  (toggle or select)
-Inheritance Fields: [field names]         (text list or multi-select)
+Inherited Fields: Priority, Effort, Area, Pursuit
 ```
+Parsed as CSV; names matched case-insensitively against the live task database schema at startup.
 
-- **Inclusive (whitelist):** only copy fields explicitly listed. Safest — new columns are ignored until opted in.
-- **Exclusive (blacklist):** copy everything except listed fields. Current default behavior.
+**Startup validation:** at daemon startup, each name in Inherited Fields is resolved against the task database schema. Any name that does not match a real property logs a WARNING:
+```
+WARNING: Inherited Fields contains 'Priorty' — no matching property found. Field skipped.
+```
+The warning is also written to Hub Section 2 Warnings field. This handles typos and renamed properties without storing IDs or writing back to the Hub.
 
 Hardcoded invariants (`FIELDS_NOT_INHERITED`, `_READONLY_PROP_TYPES`) remain in code regardless of user config — bot-managed fields and API-unwritable types are never inherited.
 
-### Open questions
-- Should "no config set" default to inclusive (safe) or exclusive (current behavior)?
-- Automation Hub implementation is a prerequisite.
+**Default when Inherited Fields is empty:** no user fields are inherited. Bot-managed fields (Name from RTD, Recurring Series, Due Date, etc.) are always set regardless.
 
 ### Dependencies
 - Automation Hub must exist before this can be configured at runtime.
+- Code cleanup (Name + relation fields added to `FIELDS_NOT_INHERITED`) can ship independently before the Hub.
 
 ---
-
 
 ## Automation Hub (formerly "Project Page")
 
@@ -266,77 +185,107 @@ Hardcoded invariants (`FIELDS_NOT_INHERITED`, `_READONLY_PROP_TYPES`) remain in 
 
 ### Decisions made so far
 - Auto-detection over activation buttons — daemon detects what exists and creates what is missing; no explicit "activate" step.
-- User creates the Hub page manually and adds its ID to `config.toml` (one-time step). Bot fills in the rest.
+- User creates the Hub page manually and adds its ID to `config.toml` (one-time step). Bot creates the 3 child databases automatically on first run.
 - Notion page IDs are permanent — users can move the Hub page anywhere after initial creation.
 - Preference: automatic setup with a clear startup log of what was created.
 - **Single hub for all automations** — not a page-per-database. All task database configs and recurring task config live here together, mirroring the structure of `config.toml`.
-- **Optional — graceful degradation:** if `hub_page_id` is absent from `config.toml`, all Hub features degrade gracefully: errors and warnings are log-only, no Hub writes occur. Every Hub-writing code path must check Hub availability before writing. This allows the daemon to run without a Hub configured.
-- **Field name parsing (all text-list fields):** Hub text fields that accept field name lists (First Value Fields, Update Count Fields, Inheritance Fields) are parsed as CSV with: strip leading/trailing whitespace per token, case-insensitive match against the database schema, support double-quoted names for fields whose names contain commas.
-- **Recurring Series type validation warning (Section 2):** if an RTD's cadence type is incompatible with its Task Type (e.g., "Maximum N per period" with Task Type ≠ "Bad Habit"), surface the warning in Hub Section 2 "Errors & Warnings". This extends the existing Anchor Day N>1 and "Maximum N wrong type" warning entries already planned for Section 2.
+- **Optional — graceful degradation:** if `hub_page_id` is absent from `config.toml`, all Hub-controlled behavioral features default to off. No config.toml fallback for behavioral settings — absence means disabled. Every Hub-writing code path must check Hub availability before writing.
+- **Field name parsing (all text-list fields):** Hub text fields that accept field name lists (First Value Fields, Update Count Fields, Inherited Fields) are parsed as CSV with: strip leading/trailing whitespace per token, case-insensitive match against the database schema, support double-quoted names for fields whose names contain commas.
+- **Recurring Series type validation warning (Section 2):** if an RTD's cadence type is incompatible with its Task Type (e.g., "Maximum N per period" with Task Type ≠ "Bad Habit"), surface the warning in Hub Section 2 Warnings field.
+- **Hub has 3 child databases:** Task Databases (Section 1), RTD Config (Section 2), Hub Status (Section 3). All three created by the bot on first run.
+- **Hub Status is a single-row database** — structured columns, clean API access via `query_database`, consistent with the other two sections.
+- **Closed Date and Reopen Count are text fields** (not checkboxes) containing the Notion property name to write to. Empty = feature disabled. Allows custom column names. Reopen Count requires Closed Date field to be set — warn if Reopen Count is configured but Closed Date is empty.
+- **Inheritance settings live in Section 2 (RTD Config)**, not Section 1 — inheritance is a recurring-task-creation concern, not a general per-database flag.
+- **Separate Errors and Warnings fields** on each database row — not combined. Enables clean formula-based health indicators (e.g. `not empty(prop("Errors"))` → 🔴).
+- **Whitelist inheritance only** — no Inheritance Mode toggle. See Configurable Field Inheritance feature.
+- **Template link for task DB and RTD setup** — bot links to the published Notion template rather than attempting to scaffold databases with formulas, rollups, and relations via API (not reliably possible). Bot-scaffolded setup applies only to the 3 Hub child databases.
+- **non_completion_statuses moves to Hub** (global, not per-database). A closed status has the same meaning regardless of which task database it's in.
+- **poll_interval, week_start, day_start_hour stay in config.toml** — they are operational parameters that affect fundamental loop timing and period calculations; changing mid-session is either meaningless or risky. Hub page displays a callout noting their location on the server.
+- **Hub change detection in the poll cycle** — the daemon watches specific fields on Hub child database rows for changes between governance passes, the same way it watches RTD pages. Fields that trigger a config reload: `database_id`, `closed_date_field`, `reopen_count_field`, `first_value_fields`, `update_count_fields` (Task DB rows); `definitions_db_id`, `tasks_db_id`, inheritance fields (RTD Config row). `Name`, `Errors`, and `Warnings` are bot-written and never trigger a reload.
+- **Name field on Task DB rows is bot-refreshed at governance** — bot looks up the database title via `get_database()` and writes it. User does not type it manually. Same for RTD Config row: bot writes both database names.
+- **Hub write timing:** at startup (config/schema validation errors) AND at each governance pass (governance errors, health stats update). Mid-poll automation errors (e.g. a 400 from Notion on a specific task write) are log-only until next governance.
+- **Config file split:** three files, all in `.gitignore`:
+  - `config.toml` — user-managed; token, DB IDs, hub_page_id, poll_interval, day_start_hour, week_start. Unchanged from current.
+  - `config_hub.toml` — bot-written; Hub child database IDs discovered or created at setup. User should not edit. Written once at Hub setup, read on every subsequent startup.
+  - `config_hub_backup.toml` — bot-written; mirror of Hub behavioral config written at each governance pass. Human-readable TOML for reference and manual restore. No auto-restore logic.
+- **Hub backup scope:** behavioral config only (automation flags, inheritance fields, global settings). Not health stats or error logs. Written at each governance pass (daily + startup).
+- **Daemon version:** bot writes its `VERSION` constant to Hub Status on each governance pass. GitHub repo link added as a static block during Hub page setup.
+- **Machine and daemon health stats:** last poll time, last governance run time + trigger (`server-reset` / `scheduled` / `force-governance`), daemon uptime (computed from recorded start time), machine uptime (read from `/proc/uptime`), CPU temperature (read from `/sys/class/thermal/thermal_zone0/temp` on Linux/Pi — skipped gracefully if unavailable). CPU% and memory usage deferred (requires `psutil` dependency).
+- **Nexus summary** (user-built, not bot-managed) — a user-maintained Notion page with formula fields pulling health indicators from the Hub. Not a bot concern for now.
 
 ### Layout concept (mirrors config.toml structure)
 
 **Section 1: Task Databases**
-A child database (table view) where each row is a task database the bot monitors.
+A child database (table view) where each row is a task database the bot monitors. Bot writes the Name field (database title) at each governance pass — user does not fill it in manually.
 
 | Column              | Type      | Notes                                                                                            |
 | ---------------------| -----------| --------------------------------------------------------------------------------------------------|
-| Name                | Title     | Human-readable label                                                                             |
-| Database ID         | Text      | Notion database ID                                                                               |
-| Closed Date         | Checkbox  | Enables closed date stamping                                                                     |
-| Reopen Count        | Checkbox  | Enables reopen count tracking                                                                    |
-| Update Count Fields | Text      | Comma-separated fields to count updates for (e.g. "Due Date"). Replaces `due_date_update_count`. |
-| First Value Fields  | Text      | Comma-separated fields to snapshot on first observation (e.g. "Due Date, Closed Date, Status")   |
-| Inheritance Mode    | Select    | Inclusive (whitelist) or Exclusive (blacklist). Default: Exclusive (current behavior).           |
-| Inheritance Fields  | Text      | Comma-separated fields for the selected inheritance mode.                                        |
-| Errors & Warnings   | Rich Text | Bot-written; cleared when resolved                                                               |
+| Name                | Title     | Bot-written: database title looked up via `get_database()`. Refreshed at each governance pass.  |
+| Database ID         | Text      | Notion database ID. Bot triggers config reload when this changes.                                |
+| Closed Date Field   | Text      | Property name to stamp on close (e.g. "Closed Date"). Empty = disabled.                         |
+| Reopen Count Field  | Text      | Property name to increment on reopen (e.g. "Reopen Count"). Empty = disabled. Requires Closed Date Field to be set — bot warns if configured without it. |
+| Update Count Fields | Text      | CSV of fields to count updates for (e.g. "Due Date").                                           |
+| First Value Fields  | Text      | CSV of fields to snapshot on first observation (e.g. "Due Date, Status").                       |
+| Errors              | Rich Text | Bot-written. Cleared when resolved.                                                              |
+| Warnings            | Rich Text | Bot-written. Cleared when resolved.                                                              |
 
-**Section 2: Recurring Tasks**
-A block (or small sub-page) showing the `[recurring_tasks]` config: definitions DB ID, tasks DB ID, enabled toggle. Errors and warnings from governance written here in an "Errors & Warnings" rich-text sub-field. Bot clears it when the issue resolves; user clears it to acknowledge.
+**Section 2: RTD Config**
+A child database with one row per recurring task setup (definitions DB + tasks DB pair). Bot writes database names at each governance pass.
+
+| Column            | Type      | Notes                                                                                            |
+| -------------------| -----------| --------------------------------------------------------------------------------------------------|
+| Name              | Title     | Bot-written: e.g. "Recurring Tasks — Task Tracker".                                             |
+| Definitions DB    | Text      | RTD database ID. Bot also writes the database name next to it for readability.                  |
+| Tasks DB          | Text      | Task database ID. Bot also writes the database name next to it for readability.                 |
+| Inherited Fields  | Text      | CSV of task field names to copy when creating a new recurring task. Empty = inherit nothing. Validated against live schema at startup — unmatched names logged as warnings. |
+| non_completion_statuses | Text | CSV of status names treated as non-completions (e.g. "Cancelled, Skipped"). Global — applies to all task databases. |
+| Errors            | Rich Text | Bot-written. Cleared when resolved.                                                              |
+| Warnings          | Rich Text | Bot-written. Cleared when resolved.                                                              |
 
 Warnings to surface here (currently only logged):
-- **Anchor Day ignored (N>1):** RTD uses "Exactly N per period" or "Minimum N per period" with N>1 and an Anchor Day set — Anchor Day is suppressed. User should clear Anchor Day or set N=1.
-- **"Maximum N per period" with wrong Task Type:** RTD uses this cadence with a type other than Bad Habit — no due date will be set. User should change Task Type to Bad Habit or change cadence.
-- **Unknown Task Type:** RTD Type field is empty or unrecognized — defaulting to Habit. User should set a valid Type: Habit, Responsibility, or Bad Habit.
+- **Anchor Day ignored (N>1):** RTD uses "Exactly N per period" or "Minimum N per period" with N>1 and Anchor Day set — Anchor Day suppressed.
+- **"Maximum N per period" with wrong Task Type:** no due date will be set.
+- **Unknown Task Type:** RTD Type is empty or unrecognized.
+- **Inherited Fields name not found:** field name in Inherited Fields does not match any property in the task database schema.
 
-**Section 3: Bot Health**
-Last poll time, daemon uptime, most recent governance run. Written on each governance pass (not every poll — too noisy).
+**Section 3: Hub Status**
+A child database with a single row representing the daemon. Written at each governance pass.
 
-Activity counters are a back-burner idea here. Useful candidates: total recurring tasks created (lifetime), closed date stamps per period. Risk: every increment is an API write, which adds up quickly at poll frequency. Preferred approach: derive counters from the Notion_Analytics data pipeline rather than maintaining them independently in the Hub. Do not implement until Notion_Analytics integration is further along.
+| Column              | Type      | Notes                                                                                            |
+| ---------------------| -----------| --------------------------------------------------------------------------------------------------|
+| Name                | Title     | Static: "Notion Automator".                                                                      |
+| Version             | Text      | Bot-written: daemon `VERSION` constant. Updated each governance pass.                           |
+| Last Poll           | Date      | Timestamp of the most recent successful poll cycle.                                              |
+| Last Governance Run | Date      | Timestamp of the most recent governance pass.                                                    |
+| Governance Trigger  | Select    | What triggered the last governance run: `server-reset`, `scheduled`, `force-governance`.        |
+| Daemon Uptime       | Text      | Human-readable elapsed time since daemon start (e.g. "3d 4h 12m").                             |
+| Machine Uptime      | Text      | Read from `/proc/uptime` on Linux/Pi. Skipped gracefully if unavailable.                        |
+| CPU Temperature     | Text      | Read from `/sys/class/thermal/thermal_zone0/temp` on Linux/Pi. Skipped if unavailable.         |
+| Errors              | Rich Text | Bot-written. Cleared when resolved.                                                              |
+| Warnings            | Rich Text | Bot-written. Cleared when resolved.                                                              |
+
+A static block on the Hub page (written once at setup) notes: "poll_interval, week_start, and day_start_hour are set in config.toml on the server and require a daemon restart to change." GitHub repo link also included as a static block.
+
+Activity counters are a back-burner idea. Preferred approach: derive counters from the Notion_Analytics data pipeline rather than maintaining them independently in the Hub.
 
 ### On "selectable field" for First Value Field tracking
 Notion does not have a native field-selector property type (the relation/rollup selector in the UI is not exposed as a reusable property). The closest approximation: a text field where the user types the field name manually. This is consistent with how `first_value_fields` works in `config.toml`. A dedicated child database (one row per tracked field, with a relation back to the Task Databases table) is possible but likely over-engineered for v1.
 
-### RTD database setup (via create_database)
+### Task DB and RTD database setup
 
-`create_database()` can also be used to scaffold a new RTD database, not just Hub sub-databases. Useful for first-time setup.
+Bot scaffolding via `create_database()` applies only to the 3 Hub child databases (Task Databases, RTD Config, Hub Status). These are simple, fully API-writable structures.
 
-**Bot creates automatically:**
-All non-formula/non-rollup fields: Type (select, pre-populated options), Cadence Type (select), Period (select), Status (status with "Active"), N Cadence (number), Anchor Day (number), Grace Period (number), Anchor Time (rich_text), plus the relation field pointing to the task database. Each field is created with a description (Notion API supports property descriptions) so the database is self-documenting out of the box.
+The task database and RTD database are **not scaffolded by the bot** — they contain formulas, rollups, and two-way relations that cannot be reliably created via the Notion API. Instead, the Hub page includes a static link to the published Notion template as the canonical setup reference. Keeping the template current is the maintainability obligation in exchange for not having to maintain API scaffolding code.
 
-**RTD field descriptions (to include in create_database call):**
-| Field        | Description                                                                                                                                                                     |
-| --------------| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Type         | Governs task behavior. Habit = repeats whether done or not; Responsibility = repeats only when completed; Bad Habit = tracks things to limit (use with "Maximum N per period"). |
-| Cadence Type | How tasks recur per period. "Exactly N" = strict count; "Minimum N" = at least N, more welcome; "Maximum N" = at most N, Bad Habit only.                                        |
-| Period       | The recurring cycle length (Daily, Weekly, Monthly, etc.).                                                                                                                      |
-| N Cadence    | Tasks to create per period. Leave blank for 1.                                                                                                                                  |
-| Anchor Day   | Day to anchor the due date (1=Mon … 7=Sun for weekly; day of month for monthly). Leave blank for full period range.                                                             |
-| Anchor Time  | Due time in HH:MM (24-hour). Leave blank for no specific time.                                                                                                                  |
-| Grace Period | Days after due date before the bot cancels an incomplete task. Leave blank to cancel on the due date.                                                                           |
-| Status       | Set to Active to enable governance for this definition.                                                                                                                         |
-
-**User completes manually (bot provides instructions):**
-- "Is Open" formula on the task table — syntax depends on the user's Status field option names, so cannot be auto-generated reliably
-- Open Task Count rollup on the RTD — requires the two-way relation and "Is Open" formula to exist first. Bot outputs the formula syntax and rollup config as a guide.
-- Bot adds the new RTD database ID to `config.toml` automatically after creation.
-
-**The two-way relation** between RTD and task table is required for the rollup. Notion API can create the relation field on the RTD side; the reverse field on the task table side is added by Notion automatically if the relation is set as two-way.
+A callout block on the Hub page (written once at setup) links to the template and notes any fields or formulas the user needs to configure manually after duplicating it.
 
 ### Required code additions
-- `create_database(parent_page_id, title, properties)` — to be added to `notion_api.py`.
-- Bot must read Hub config at startup (after `config.toml`) and merge with or override local flags.
-- Bot must write errors/warnings per-database-row rather than only to logs.
+- `create_database(parent_page_id, title, properties, icon=None)` — to be added to `notion_api.py`. POST to `/databases` with page parent. First Hub prerequisite.
+- `config_hub.toml` read/write logic — daemon reads child database IDs from this file at startup; writes them after Hub setup or first-run database creation. Avoids block scanning on subsequent startups.
+- `config_hub_backup.toml` write logic — written at each governance pass with a TOML mirror of the Hub's behavioral config (automation flags, inherited fields, global settings, database IDs). Human-readable for reference and manual restore. No auto-restore.
+- Hub poll-cycle change detection — daemon snapshots relevant Hub database row fields each poll and triggers a config reload (and governance if appropriate) when they change. Mirrors the RTD change-detection pattern.
+- Bot must read Hub config at startup (after `config.toml`) and apply to running config.
+- Bot must write errors/warnings per-database-row and per-section rather than only to logs. Write timing: startup (validation errors) and governance pass (governance errors + health stats).
 - Hub availability check: every Hub-writing path must check that Hub is configured and reachable. If not: log-only, no write attempted.
 
 ### Config layer ownership (settled)
@@ -365,32 +314,12 @@ A checkbox field on the Hub page itself (not per-RTD). On each poll, the daemon 
 - Log at INFO: `"Force governance triggered by user via Automation Hub."`
 
 ### Open questions
-- Status dashboard write frequency: governance runs only (startup + daily governance cron) to avoid excessive API writes.
+- None currently open — all major design questions resolved in the August 2026 design session.
 
 ### Dependencies
 - Automation Hub must exist before Notifications can store webhook URLs there.
 - `create_database()` API method needed in `notion_api.py` first.
 - Every automation must be updated to write its errors/warnings to the Hub row for its database rather than only to logs.
-
----
-
-## Notifications
-
-**Status:** Pre-design
-**One-liner:** Outbound webhook support (Discord, Telegram) so the daemon can alert on governance events without requiring the user to check logs.
-
-### Decisions made so far
-- Implemented as `notifiers.py` — a utility module, not an automation function.
-- Automations call it as a side effect — outside the `automations.py` return-dict pattern.
-- Webhook URLs stored in the Automation Hub (not hardcoded in `config.toml`).
-
-### Open questions
-- Which events trigger a notification? (e.g. task deleted and replaced, grace period cancel, RTD duplicate name, At-most-N cap reached)
-- Opt-in per-event or opt-out?
-- Rate limiting — governance could fire multiple alerts in one run.
-
-### Dependencies
-- Project Page feature (for webhook URL configuration).
 
 ---
 
@@ -411,76 +340,6 @@ A checkbox field on the Hub page itself (not per-RTD). On each poll, the daemon 
 
 ### Dependencies
 - None. Standalone automation function, no dependency on other planned features.
-
----
-
-## Improvement: Cumulative Overdue Time Tracking
-
-**Status:** Pre-design
-**One-liner:** Bot accumulates the number of governance passes a task has spent overdue into a number field; a Notion formula combines it with Due Date Change Counter for a per-task volatility score.
-
-### Motivation
-Due Date Change Counter alone doesn't catch the "let it stay overdue forever" pattern — a task that never gets rescheduled accumulates no change count. The overdue accumulator closes that gap: every daily governance pass where the task is open and past-due increments the counter, regardless of whether the user has touched it.
-
-### Design
-- New bot-managed field on the task database: `Overdue Days` (Number)
-- During each governance pass: if task is open AND Due Date end < now, increment `Overdue Days` by 1
-- Does NOT reset on task close — the final value is a permanent record of how long it was overdue before resolution
-- For recurring tasks: each new task instance is a new Notion page, so the counter naturally starts at 0 per period; no explicit reset needed
-- Volatility formula (user-defined in Notion, not bot-managed):
-  `Due Date Change Counter * weightA + Overdue Days * weightB`
-  Thresholds for High/Medium/Low are user's choice — not hardcoded by the bot
-
-### What the bot does NOT do
-- Does not write a "Volatility" field — that's a formula the user controls
-- Does not reset the counter at any point after task creation
-
-### Dependencies
-- None — can implement independently of Field Update Count and First Value tracking
-- Governance pass already iterates all open tasks; this adds one conditional increment per task
-
----
-
-## Improvement: RTD Current Period Field
-
-**Status:** Pre-design
-**One-liner:** Bot-written `Current Period` Date field (start + end) on the RTD — enables Notion formula fields, rollups filtering tasks by current period, and Siri Shortcuts period-aware task lookup.
-
-### Design
-- Field: `Current Period` — Date (start + end) on the RTD database
-- Governance writes this field on every governance pass (cron + startup + RTD activation)
-- Value: period start datetime → period end datetime for the current period
-- Single date property with both start and end set — matches Notion's native date range format
-
-### Why needed
-Notion formulas on task pages cannot compute period boundaries without a reference point. A formula using `.map(current.prop("Current Period"))` on the RTD relation can check whether a task's Due Date or Closed Date falls within the period — enabling "tasks this period" filters and rollups without bot involvement in per-task field writes. Also lets Siri Shortcuts read the period boundary directly rather than computing it from RTD fields.
-
-### Note on Tasks Done This Period
-The `Tasks Done This Period` Number field (previously planned as a bot-maintained counter on the RTD) is dropped in favour of this approach. A Notion rollup counting tasks where the period formula is satisfied is more accurate and requires no bot maintenance.
-
-### Dependencies
-- None — standalone governance write
-
----
-
-## Timer / Mission Tracking
-
-**Status:** Pre-design (early — major open questions remain)
-**One-liner:** Link closed tasks to mission areas (ADHD Medication, Art Chatbot, Improv, etc.) and surface a per-period effort heatmap across those missions.
-
-### Context
-The user maintains high-level mission/workbench areas in Notion. Each mission has its own page with notes and details. The idea is to aggregate closed tasks per period and attribute them to a mission — lightweight effort tracking, not time-logging.
-
-### Open questions
-- **Attribution method:** explicit relation field on the task (precise but requires user to fill it in), tag/keyword match (automatic but fuzzy), or mission page rollup?
-- **Data model:** does the bot write anything back to the mission page, or is this pure reporting via Notion_Analytics?
-- **"Timer" definition:** duration field, task count, or something else? No logged time exists — effort is inferred.
-- **Scope:** is this Notion_Automator (bot writes to tasks/missions) or Notion_Analytics (read-only reporting from existing data)?
-
-### Dependencies
-- Needs attribution method decision before any design can happen.
-- If bot-writes-back: depends on Project Page for configuration.
-- If reporting-only: may belong entirely in Notion_Analytics, not here.
 
 ---
 
@@ -562,82 +421,16 @@ Currently Habits get no Due Date, so they never appear in Notion "today"/"this w
 
 ---
 
-## Companion: Siri Shortcuts Integration
+## Undeveloped Ideas
 
-**Status:** Pre-design (external to bot — no Notion_Automator code changes required)
-**One-liner:** iOS Siri Shortcuts that close the current period's open task for a given RTD via voice trigger — bot reacts on next poll exactly as for any manual close.
+_Features with no active design work. Full history in git. Promote to a full section when actively designing._
 
-### Design
-
-Two modes used together:
-
-**Per-RTD shortcuts (daily habits):**
-- Named e.g. "Notion Habit Physical Therapy" — zero friction, purely hands-free
-- Hardcoded RTD page ID; no user input or disambiguation step
-- Flow: read `Current Period` from RTD → query task DB for open tasks for that RTD in that period → PATCH first match to Done
-
-**Generic shortcut with Apple Intelligence (all other RTDs):**
-- Named e.g. "Complete Habit" — one shortcut handles everything without a dedicated per-RTD shortcut
-- Flow:
-  1. Query Active RTD definitions DB → collect RTD names
-  2. Siri asks "which one?" — user responds in natural language
-  3. Apple Intelligence matches response to closest RTD name (fuzzy — "the stretching one" resolves to "Daily PT Exercises")
-  4. Read `Current Period` from matched RTD → query open tasks in that period → PATCH first match to Done
-
-### Why `Current Period` matters here
-Without it, the shortcut must derive period boundaries from the RTD's Period, Anchor Day, and Anchor Time fields — doable but fragile. Reading `Current Period` directly from the RTD is simpler and always consistent with what governance computed.
-
-### What the bot does
-Nothing new. The shortcut PATCHes Status to Done; on the next poll the bot stamps Closed Date and creates the next task exactly as for any manual close.
-
-### Notes
-- The Notion API token must be stored in each shortcut. Acceptable for a personal device.
-- "Close one" behavior: if multiple tasks exist for the period (rare), the shortcut closes the first one returned by the Notion query. Period filtering via `Current Period` prevents accidentally closing a future-period task.
-
-### Dependencies
-- `RTD Current Period Field` feature — enables period-aware task filtering in the shortcut
-- iOS with Apple Intelligence for the generic shortcut's disambiguation; per-RTD shortcuts work without it
-
----
-
-## Range Cadence (Minimum N, Maximum M)
-
-**Status:** Pre-design
-**One-liner:** A new Cadence Type that enforces both a minimum and a maximum per period — e.g. "at least 2 gym sessions, at most 5."
-
-### Motivation
-Current cadences are one-sided: Minimum N (open-ended upper bound) or Exactly N (hard cap). A range cadence gives users a target window rather than a single number.
-
-### Open questions
-- Field representation: two separate number fields (`N Cadence` and `M Cadence`), or a single text field ("2-5"), or two new RTD columns?
-- Governance behavior when count is between N and M: no action (in range), create more if below N, stop creating if at M.
-- What happens at M? Same as "Exactly N" — route next task to next period. Or flag the RTD and let the user decide?
-- How does this interact with Extended Cadence (every Y periods)?
-
-### Dependencies
-- Resolve DESIGN.md discrepancy #9 (Maximum N behavior) first — the current implementation hard-routes to next period rather than soft-capping. Range cadence needs that resolved to know which model to build on.
-- Extended Cadence design should be reviewed for overlap before committing to new fields.
-
----
-
-## Task Templates
-
-**Status:** Pre-design
-**One-liner:** Apply a Notion template to bot-created recurring tasks so they include user-configured buttons and content (e.g. "Create child task", "Create blocker task").
-
-### Background
-Notion's API supports templates via `GET /v1/data_sources/{db_id}/templates` (list) and `POST /v1/pages` with `template: {type: "template_id", template_id: "..."}` (create). Template content is applied asynchronously — the page is returned immediately but blank; Notion fills in content in the background.
-
-### Design
-- Config: optional `template_id` (or `template_name`) per `[[databases]]` entry in `config.toml`
-- At startup: bot resolves template name → ID (via list endpoint) if name configured
-- On task creation: pass `template` param to `create_page()`; omit `children` (not allowed when using templates)
-- Template must be in the same workspace and accessible to the integration token
-
-### Open questions
-- Should template be per-RTD or per-database? Per-database is simpler; per-RTD allows different templates for different series.
-- `notion_api.py` needs a `list_templates(database_id)` method — design alongside the feature.
-- Async gap: page exists but is blank for a moment. Does the bot's next poll see incomplete content? Probably not an issue since the bot only reads/writes properties, not page content.
-
-### Dependencies
-- `notion_api.py`: add `list_templates()` and update `create_page()` to accept an optional `template_id` param
+- Extended Cadence (Every Y Periods) — support recurring cadences spanning multiple periods (bi-weekly, quarterly, etc.); simplified picker + Custom X-per-Y mode.
+- Notifications — outbound webhook support (Discord, Telegram) for governance events; URLs stored in Automation Hub.
+- Cumulative Overdue Time Tracking — bot-managed `Overdue Days` field incremented each governance pass the task is open and past-due.
+- RTD Current Period Field — bot-written `Current Period` date range (start+end) on RTD; enables formula/rollup period filtering and Siri Shortcuts lookup.
+- Timer / Mission Tracking — link closed tasks to mission areas; surface per-period effort heatmap. Scope unclear (Automator vs Analytics).
+- Companion: Siri Shortcuts Integration — iOS shortcuts to close current period's open task for an RTD via voice; depends on RTD Current Period field.
+- iOS Reminders Integration — use iOS Reminders (CalDAV) as reminder layer; creates reminder on due date set, clears on close.
+- Range Cadence (Min N, Max M) — new Cadence Type enforcing both a minimum and a maximum per period.
+- Task Templates — apply a Notion template to bot-created recurring tasks for user-configured buttons/content.

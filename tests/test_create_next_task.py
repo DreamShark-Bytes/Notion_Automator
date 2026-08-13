@@ -23,11 +23,27 @@ CANCELLED_STATUS = "Cancelled"
 OPEN_STATUS = "Not started"
 
 
+_TEST_PAIR = {
+    "definitions_db_id":       "b" * 32,
+    "tasks_db_id":             "test-tasks-db",
+    "closed_date_field":       "Closed Date",
+    "non_completion_statuses": None,
+    "inherited_fields":        [],
+    "_task_schema":            None,
+}
+
+
 @pytest.fixture(autouse=True)
 def module_state(monkeypatch):
-    monkeypatch.setattr(recurring_tasks, "_tasks_db_id", "test-tasks-db")
     monkeypatch.setattr(recurring_tasks, "_day_start_hour", 0)
     monkeypatch.setattr(recurring_tasks, "_get_status_group", fake_status_group)
+    recurring_tasks.configure_pairs([{
+        "definitions_db_id":       "b" * 32,
+        "tasks_db_id":             "test-tasks-db",
+        "closed_date_field":       "Closed Date",
+        "non_completion_statuses": [],
+        "inherited_fields":        [],
+    }], week_start_day=6, day_start_hour=0)
 
 
 def today_str():
@@ -67,7 +83,7 @@ def test_cancelled_trigger_with_open_current_period_task_does_not_advance():
 
     recurring_tasks._create_next_task(
         client, cancelled, make_definition("Responsibility", period="Day",
-                                           cadence_type="Once per period")
+                                           cadence_type="Once per period"), _TEST_PAIR
     )
     client.create_page.assert_not_called()
 
@@ -89,7 +105,7 @@ def test_cancelled_trigger_with_no_current_period_task_creates_for_today():
 
     recurring_tasks._create_next_task(
         client, cancelled, make_definition("Responsibility", period="Day",
-                                           cadence_type="Once per period")
+                                           cadence_type="Once per period"), _TEST_PAIR
     )
     client.create_page.assert_called_once()
     # New task should target today, not tomorrow
@@ -121,7 +137,7 @@ def test_completion_advances_to_next_period():
 
     recurring_tasks._create_next_task(
         client, done_task, make_definition("Responsibility", period="Day",
-                                           cadence_type="Once per period")
+                                           cadence_type="Once per period"), _TEST_PAIR
     )
     client.create_page.assert_called_once()
     created_props = client.create_page.call_args[1].get(
@@ -155,7 +171,7 @@ def test_open_task_does_not_count_as_completion():
 
     recurring_tasks._create_next_task(
         client, cancelled_old, make_definition("Habit", period="Day",
-                                               cadence_type="Once per period")
+                                               cadence_type="Once per period"), _TEST_PAIR
     )
     # Should not advance: open task covers today, cancelled old task is not a completion
     client.create_page.assert_not_called()
