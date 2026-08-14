@@ -517,6 +517,7 @@ def main():
         logger.info("--reconcile flag set: retroactively writing Period Key, Occurrence #, and Period Target on all recurring tasks (task creation skipped).")
         recurring_tasks.set_reconcile_flags(period_key=True, period_target=True, occurrence_number=True)
 
+    logger.info("Running governance: daemon startup.")
     gov_created = run_governance(client)
     recurring_tasks.set_reconcile_flags()  # reset (no-op if flags were never set)
 
@@ -549,11 +550,9 @@ def main():
     last_polled: dict[str, str] = {db_id: startup_time for db_id in database_ids}
 
     # Track date of last GOVERNANCE run so the daily cron fires at most once per day.
-    # Initialized to yesterday so the startup governance run does not suppress
-    # the next cron. The startup run has already executed above; the cron
-    # will fire the next time the clock reaches day_start_hour.
-    from datetime import timedelta
-    last_governance_date = datetime.now().date() - timedelta(days=1)
+    # Initialized to today because the startup governance pass above already ran.
+    # The next cron fires tomorrow at day_start_hour.
+    last_governance_date = datetime.now().date()
 
     logger.info(f"Starting Notion automation daemon.")
     logger.info(f"  Databases  : {database_ids}")
@@ -568,6 +567,33 @@ def main():
             try:
                 hub_snapshot, hub_activated, hub_is_active = hub.poll_for_changes(client, hub_snapshot)
                 if hub_activated:
+                    # Re-read Hub config to pick up newly activated rows before governance runs.
+                    new_hub_cfg = hub.read_config(client)
+                    if new_hub_cfg is not None:
+                        new_databases = new_hub_cfg["databases"]
+                        new_database_ids = [db["id"] for db in new_databases]
+                        for db in new_databases:
+                            register_automation_db(db["id"], db)
+                            if db["id"] not in database_ids:
+                                snapshots[db["id"]] = run_automations_init_pass(client, db["id"])
+                                last_polled[db["id"]] = _utcnow_iso()
+                        database_ids = new_database_ids
+                        new_rtd_pairs = new_hub_cfg["rtd_pairs"]
+                        if new_rtd_pairs:
+                            recurring_tasks.configure_pairs(new_rtd_pairs, week_start_day, day_start_hour)
+                            rt_defs_id = new_rtd_pairs[0]["definitions_db_id"]
+                            if last_polled_rtd is None:
+                                try:
+                                    rtd_pages = client.query_database(rt_defs_id)
+                                    rtd_snapshot = {p["id"]: _strip_files(p) for p in rtd_pages}
+                                    last_polled_rtd = _utcnow_iso()
+                                except Exception as e:
+                                    logger.error(f"Failed to build RTD snapshot after Hub activation: {e}")
+                        logger.info(
+                            f"Hub activation: reconfigured with {len(database_ids)} database(s), "
+                            f"{len(new_hub_cfg['rtd_pairs'])} RTD pair(s)."
+                        )
+                    logger.info("Running governance: Hub row(s) activated.")
                     gov_created = run_governance(client)
                     if gov_created:
                         _init_pass_on_pages(client, gov_created, snapshots)
@@ -592,7 +618,7 @@ def main():
         governance_time_today = datetime.combine(now_local.date(), dtime(day_start_hour, 0))
         if now_local >= governance_time_today and last_governance_date != now_local.date():
             last_governance_date = now_local.date()
-            logger.info(f"{day_start_hour:02d}:00 cron: running GOVERNANCE functions.")
+            logger.info(f"Running governance: daily {day_start_hour:02d}:00 cron.")
             gov_created = run_governance(client)
             if gov_created:
                 _init_pass_on_pages(client, gov_created, snapshots)
@@ -619,6 +645,7 @@ def main():
                 logger.error(f"Failed to poll RTD database: {e}")
                 rtd_activated = False
             if rtd_activated:
+                logger.info("Running governance: RTD definition activated.")
                 gov_created = run_governance(client)
                 if gov_created:
                     _init_pass_on_pages(client, gov_created, snapshots)

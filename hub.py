@@ -233,12 +233,23 @@ def is_available() -> bool:
 #  config_hub.toml read / write
 # ------------------------------------------------------------------ #
 
+def _normalize_uuid(value: str) -> str:
+    """Normalize a Notion database ID to standard UUID format (8-4-4-4-12).
+    Accepts IDs with no dashes or with dashes in wrong positions."""
+    raw = value.replace("-", "")
+    if len(raw) == 32 and all(c in "0123456789abcdefABCDEF" for c in raw):
+        return f"{raw[:8]}-{raw[8:12]}-{raw[12:16]}-{raw[16:20]}-{raw[20:]}"
+    return value
+
+
 def _load_hub_ids() -> dict:
-    """Read config_hub.toml and return its [databases] section, or {} on any failure."""
+    """Read config_hub.toml and return its [databases] section, or {} on any failure.
+    Normalizes all ID values to standard UUID format on load."""
     try:
         with open(HUB_CONFIG_PATH, "rb") as f:
             data = tomllib.load(f)
-        return data.get("databases", {})
+        ids = data.get("databases", {})
+        return {k: _normalize_uuid(v) for k, v in ids.items()}
     except FileNotFoundError:
         return {}
     except Exception as e:
