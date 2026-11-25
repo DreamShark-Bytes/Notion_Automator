@@ -174,7 +174,7 @@ def _load_task_db_schema(client: "NotionClient", pair: dict) -> None:
     if pair.get("_task_schema") is not None or not pair.get("tasks_db_id"):
         return
     try:
-        db = client.get_database(pair["tasks_db_id"])
+        db = client.get_schema(pair["tasks_db_id"])
         pair["_task_schema"] = set(db.get("properties", {}).keys())
         logger.info(f"Task DB schema loaded for {pair['tasks_db_id']}: {len(pair['_task_schema'])} properties.")
     except Exception as e:
@@ -330,7 +330,7 @@ def _get_status_group(client: "NotionClient", page: dict | None, status_field: s
         return None
 
     if db_id not in _status_group_cache:
-        db = client.get_database(db_id)
+        db = client.get_schema(db_id)
         status_schema = db.get("properties", {}).get(status_field, {})
         mapping: dict[str, str] = {}
         for group in status_schema.get("status", {}).get("groups", []):

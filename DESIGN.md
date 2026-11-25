@@ -20,7 +20,7 @@ _Orientation only. Use `grep -n "^## " DESIGN.md` for full TOC with line numbers
 | `recurring_tasks.py` | All recurring task logic + shared helpers |
 | `automations.py` | AUTOMATIONS and GOVERNANCE registries |
 | `bot_notes.py` | Bot Notes accumulator (flushed after each governance run) |
-| `hub.py` | Automation Hub — in progress (feature/automation-hub branch) |
+| `hub.py` | Configuration Hub — in progress (feature/automation-hub branch) |
 
 **Design principles (never re-debated per feature):**
 - Minimum surprise — bot never takes an action the user wouldn't expect
@@ -35,6 +35,44 @@ _Orientation only. Use `grep -n "^## " DESIGN.md` for full TOC with line numbers
 - `auto_recurring_tasks` must remain last in AUTOMATIONS registry
 - RTD Type empty/None → skip silently; unrecognized → WARNING; no default type applied
 - Hub owns behavioral config; config.toml keeps token/IDs/poll_interval/week_start/day_start_hour
+- `config.toml` remains a supported developer escape hatch: it owns operational/workspace settings and may also carry ad hoc or experimental automation configuration. The Configuration Hub is the promoted, user-friendly configuration surface once a feature has a stable schema; Hub adoption must not make short-lived developer experiments require Hub schema changes.
+
+### Configuration and automation extensibility
+
+The Configuration Hub is not intended to replace the extension model. A developer adds an automation in code following the existing registries (`AUTOMATIONS` for per-page behavior and `GOVERNANCE` for cross-page behavior), then may expose stable user-facing settings in the Hub. The implementation should remain useful before that Hub integration exists: experimental or project-specific settings may be read from `config.toml`, with clear defaults and validation. Once an automation's configuration is stable and intended for non-technical users, its supported settings should be represented by typed Hub properties rather than an opaque JSON/TOML blob.
+
+> **Direction changed 2026-11-13 (not yet implemented):** the user decided Hub configuration will be one config database with a TOML code block in each row's page body, validated by code, with problems reported in the row's Warnings and Errors columns. The sentence above and the typed-column Hub layout are superseded once that is built. See PLANNED.md "Configuration Hub" > "Redesign". This note is removed and the decision log updated at implementation.
+
+This gives the project two deliberate configuration tiers:
+
+1. **`config.toml`** — required workspace identity and operational settings (token, database IDs, Hub page ID, polling interval, week start, and day-start hour), plus an allowed fallback for developer-owned or ad hoc automation settings. File changes that affect daemon initialization require a restart.
+2. **Configuration Hub** — the preferred interface for stable behavioral configuration, validation, health reporting, and runtime changes that the daemon explicitly supports.
+
+Hub configuration takes precedence when a feature has a defined Hub schema. A feature that has no Hub integration may continue to use its documented `config.toml` section. The daemon must not silently merge conflicting values; precedence and fallback behavior must be documented per feature.
+
+### Cross-datasource relationship automations
+
+Cross-datasource automation is a separate design track, not an implicit extension of the current per-database automation flags. A rule may use an actual Relation path, but it must also support an explicit query against another configured database when no Relation property exists. Candidate examples include:
+
+- when a task becomes Complete, close an open linked Timebox session and stamp its close date/time;
+- when a parent task becomes Complete, optionally close linked child tasks.
+- when an Application page receives an Applied Date, find the open `Apply to Jobs` recurring task whose Due Date matches today or a configured period, then close the task without requiring the user to open the Task database.
+
+The likely configuration model is a dedicated **Relationship Automations** Hub data source, analogous to RTD Config: one row per rule, with source database/property, trigger transition, target database, relation path or relation-free match predicate, target selection/filter/sort, and one or more actions. The rule must explicitly state whether a child action mirrors the parent's state or applies a named target state; destructive propagation should require an opt-in policy and should produce Bot Notes/audit information.
+
+The general execution model is **source event → target query → target mutation**. For relation-free matching, the target query should combine a stable recurring-definition ID (preferably the Task page's Recurring Series relation), an open-status predicate, and a Due Date period predicate. A Pursuit relation may provide useful context, but it should not be the primary identity when the automation is specifically intended for one RTD. Visible names may be shown in the Hub for usability, but IDs should be the durable identity wherever available.
+
+An RTD is designed to maintain **one open task at a time by default**, but users may intentionally override that behavior by opening or creating additional tasks. The RTD relation therefore identifies a series, not a unique task. Multiple open task pages may legitimately share the same RTD, particularly with multi-occurrence cadences or manual duplicates. The safe default is therefore **unique match required**: zero matches or multiple matches produce no automatic write and instead create a Bot Note or relationship-rule warning for user resolution. Choosing the nearest Due Date or acting on all matches must be explicit opt-in behavior.
+
+Do not make the first version an arbitrary JSON/TOML interpreter. Prefer a typed library of triggers, selectors, and actions, with validation against live schemas. A structured escape hatch may be added later for developer experiments, but it must be isolated from the stable Hub rows and must not permit unrestricted writes by accident. The design still needs to settle cycle prevention, previous-state detection, relationship traversal, target filtering/sorting, batching, permissions, and failure/retry behavior.
+
+Notion's own database automation terminology is a useful conceptual reference—trigger → action—but this project should use its own implementation and configuration vocabulary. Notion database automations currently support multiple triggers/actions, editing pages in another database, and variables derived from a trigger page, but they cannot be triggered by another database automation; these constraints are relevant when deciding which cross-datasource behavior belongs in Notion versus this daemon. See the official [Notion database automations documentation](https://www.notion.com/help/database-automations).
+
+### Hub layout and multiple data sources
+
+Notion now supports multiple data sources in one database, including linked sources, and can display views from different sources as tabs. That is a presentation/convenience feature, not a reason to collapse the Hub's logical configuration tables into one source. Keep Task Databases, RTD Config, Hub Status, and any future Relationship Automations as distinct data sources with distinct schemas. They may be surfaced together through a Hub page, linked views, or tabs.
+
+If sources are hidden behind tabs or nested pages, the setup must make their ownership and deletion risk obvious. The daemon should cache and validate source IDs, detect missing/trashed sources, and provide a recovery path rather than recreating a replacement silently.
 
 **Section map:**
 
@@ -662,7 +700,7 @@ Resolved design decisions. Each entry states the rule and the reason so future c
 - `emoji` and `external` icon types are copied. `file` type (Notion-hosted uploads) is skipped — the hosted URL is not reliably writable via API.
 - If the RTD has no icon, the task is created without one (no change to current behavior).
 - Icon is passed via the `icon` param added to `create_page` in `notion_api.py`. Applied to both the primary create call and the fallback retry (no inherited fields).
-- Always-on; not config-controlled. Configurable field inheritance belongs in the Automation Hub.
+- Always-on; not config-controlled. Configurable field inheritance belongs in the Configuration Hub.
 
 **[RTD optional field defaults] Empty or unrecognized RTD field values use safe defaults rather than erroring.**
 - `Type` empty, `"None"`, or unrecognized → skip the RTD silently (debug log for empty/"None"; WARNING for unrecognized values). No default type is applied — an unconfigured RTD creates no tasks until Type is set.
@@ -807,7 +845,7 @@ Resolved design decisions. Each entry states the rule and the reason so future c
 - Governance drift-corrects Period Key, Occurrence #, and Period Target on all tasks in the current and future periods on every pass. An RTD config change is fully reflected after the next startup, governance cron, or RTD activation trigger — no `--reconcile` needed for current/future tasks.
 - Historical closed tasks (periods before the current period) are not corrected by normal governance. Use `--reconcile` if historical records also need correction.
 - Due Dates on existing open tasks are not rewritten — only newly created tasks get Due Dates computed from the new settings. An open task may retain a Due Date from the old period granularity; it will close normally and the replacement task will have the correct Due Date.
-- **Workaround for immediate application:** set RTD Status → inactive, wait one poll cycle, set back to Active. The Status → Active transition triggers an immediate governance run. A dedicated Force Governance checkbox on the Automation Hub is planned — see PLANNED.md.
+- **Workaround for immediate application:** set RTD Status → inactive, wait one poll cycle, set back to Active. The Status → Active transition triggers an immediate governance run. A dedicated Force Governance checkbox on the Configuration Hub is planned — see PLANNED.md.
 
 **[Instance #] Assigned by COUNT of existing tasks, not MAX+1.**
 - Reason: MAX+1 creates gaps or inflated numbers if a user edits Instance # values directly. COUNT of related tasks for this RTD in the current period is resilient to user edits — the value of Instance # on existing tasks is irrelevant, only the count matters.

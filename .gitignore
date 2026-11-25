@@ -1,16 +1,20 @@
 # Scratch / temporary output
 scratch.md
+scratch-archive.md
 STATUS.md
-docs/
-wiki-drafts/
+notion_wiki_drafts/
 
 # Secrets
 config.toml
+config_secrets.toml
+secrets.toml
 config_backup.toml
 *.bak
 .env
 
 # Hub runtime files (workspace-specific Notion IDs — not for version control)
+config_hub_state.toml
+config_automations.toml
 config_hub.toml
 config_hub_backup.toml
 
@@ -18,9 +22,12 @@ config_hub_backup.toml
 .claude/
 CLAUDE*.md
 *Session-History*.md
+AGENTS.md
+AI_AGENT_INSTRUCTIONS.md
 
 # Python
 __pycache__/
+.pytest_cache/
 *.pyc
 *.pyo
 venv/
@@ -29,5 +36,6 @@ venv/
 # Logs
 *.log*
 
-# Tools (for now)
-/tools
+# Tools: only scripts meant to ship are listed. Config files and backup CSVs in tools/ can hold real data.
+/tools/*
+!/tools/describe_database.py

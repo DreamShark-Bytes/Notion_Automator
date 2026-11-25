@@ -7,6 +7,7 @@ Usage:
     python daemon.py --config my.toml  # use a different config file
 """
 
+import os
 import sys
 import time
 import logging
@@ -30,13 +31,18 @@ from recurring_tasks import BOT_CREATED_PAGES_KEY
 import hub
 
 VERSION = "1.2.1"
-NOTION_API_MIN_VERSION = "1.3.0"
+NOTION_API_MIN_VERSION = "1.4.0"
 
 parser = argparse.ArgumentParser(description="Notion automation daemon")
 parser.add_argument(
     "--config",
     default="config.toml",
     help="Path to config file (default: config.toml)",
+)
+parser.add_argument(
+    "--secrets",
+    default=None,
+    help="Path to secrets file (default: config_secrets.toml next to the config file)",
 )
 parser.add_argument(
     "--debug",
@@ -120,18 +126,22 @@ def run_governance(client: NotionClient) -> list[dict]:
     Returns a list of pages created during governance so the caller can run
     an automations init pass on them (to populate fields like Reopen Count
     and Due Date Update Count that are only written during init).
+    A pass with no GOVERNANCE failure stamps "Last verified time" on the Active Hub config rows.
     """
     clear_bot_notes()
     created_pages: list[dict] = []
+    governance_ok = True
     for fn in GOVERNANCE:
         try:
             result = fn(client)
             if result:
                 created_pages.extend(result)
         except Exception as e:
+            governance_ok = False
             logger.error(f"GOVERNANCE function '{fn.__name__}' failed: {e}")
     flush_bot_notes(client)
     clear_bot_notes()
+    hub.mark_verified(client, governance_ok)
     return created_pages
 
 
@@ -346,9 +356,13 @@ def main():
     with open(args.config, "rb") as f:
         cfg = tomllib.load(f)
 
-    token = cfg.get("token")
+    secrets_path = args.secrets or os.path.join(os.path.dirname(os.path.abspath(args.config)), hub.SECRETS_FILE_NAME)
+    token = hub.resolve_token(cfg, hub.load_secrets(secrets_path))
     if not token:
-        raise RuntimeError("token is not set in config.toml")
+        old_path = os.path.join(os.path.dirname(secrets_path), "secrets.toml")
+        renamed = (f" The file was renamed: rename {old_path} to {secrets_path}."
+                   if os.path.exists(old_path) and not os.path.exists(secrets_path) else "")
+        raise RuntimeError(f'No Notion token: put token = "..." in {secrets_path} (see config_secrets_example.toml).{renamed}')
 
     poll_interval = cfg.get("poll_interval", 60)
 
@@ -387,9 +401,13 @@ def main():
     if week_start_str not in _WEEK_DAY_MAP:
         logger.warning(f"Unknown week_start '{cfg.get('week_start')}' — defaulting to Sunday.")
 
-    hub_page_id = cfg.get("automation_hub_page_id")
-
-    client = NotionClient(token, debug=args.debug)
+    config_ds_id = cfg.get("config_hub_data_source_id")
+    status_ds_id = cfg.get("status_data_source_id")
+    if cfg.get("automation_hub_page_id"):
+        logger.warning(
+            "automation_hub_page_id in config.toml is no longer used. Set config_hub_data_source_id "
+            "(and status_data_source_id); README: \"Setting up the Configuration Hub\"."
+        )
 
     daemon_start = datetime.now()
 
@@ -401,16 +419,20 @@ def main():
         min_tuple = tuple(int(x) for x in NOTION_API_MIN_VERSION.split("."))
         installed_tuple = tuple(int(x) for x in api_version.split("."))
         if installed_tuple < min_tuple:
-            logger.warning(
-                f"Notion_API v{api_version} is below minimum v{NOTION_API_MIN_VERSION}"
+            sys.exit(
+                f"Notion_API v{api_version} is below the required v{NOTION_API_MIN_VERSION}"
                 f" — run: pip install -r requirements.txt"
             )
 
+    notion_version = hub.resolve_notion_version(cfg.get("notion_version"))
+    logger.info(f"Notion API version: {notion_version}")
+    client = NotionClient(token, debug=args.debug, notion_version=notion_version)
 
-    if hub_page_id:
-        hub.init(client, hub_page_id, daemon_version=VERSION)
+
+    if config_ds_id:
+        hub.init(client, config_ds_id, status_ds_id or "", daemon_version=VERSION)
     else:
-        logger.info("automation_hub_page_id not set in config.toml — Hub features disabled.")
+        logger.info("config_hub_data_source_id not set in config.toml — Hub features disabled.")
 
     # ---- Database and RTD config loading --------------------------------
     # Hub takes precedence when available. config.toml [[databases]] / [recurring_tasks]
@@ -430,24 +452,29 @@ def main():
         for db in databases:
             register_automation_db(db["id"], db)
         if not databases:
-            logger.warning("Hub: no Active rows in Automated Databases — monitoring zero task databases.")
+            logger.warning("Hub: no Active property_automations in the config rows — monitoring zero task databases.")
 
         rtd_pairs = hub_cfg["rtd_pairs"]
         if rtd_pairs:
             recurring_tasks.configure_pairs(rtd_pairs, week_start_day, day_start_hour)
             rt_defs_id = rtd_pairs[0]["definitions_db_id"]  # used for RTD snapshot polling
         else:
-            logger.warning("Hub: no Active rows in RTD Config — recurring task governance disabled.")
+            logger.warning("Hub: no Active recurring_tasks table in the config rows — recurring task governance disabled.")
         logger.info(
-            f"Config source: Automation Hub "
+            f"Config source: Configuration Hub "
             f"({len(databases)} database(s), {len(rtd_pairs)} RTD pair(s))"
         )
     else:
         # config.toml fallback
         _toml_dbs = cfg.get("databases", [])
         if not _toml_dbs:
+            if config_ds_id:
+                raise RuntimeError(
+                    "The Configuration Hub is configured (config_hub_data_source_id) but its config could not be read; "
+                    "see the 'Hub:' errors and warnings above for the reason. config.toml has no [[databases]] fallback."
+                )
             raise RuntimeError(
-                "No [[databases]] entries found in config.toml and Hub is not available."
+                "No [[databases]] entries found in config.toml and config_hub_data_source_id is not set."
             )
         databases = _toml_dbs
         database_ids = [db["id"] for db in databases]
@@ -479,7 +506,7 @@ def main():
                 rt_defs_id = _rt_defs_id
             else:
                 logger.warning("recurring_tasks enabled but definitions_db_id or tasks_db_id is missing — skipping.")
-        src = "Hub not available" if hub_page_id else "Hub not configured"
+        src = "Hub not available" if config_ds_id else "Hub not configured"
         logger.info(
             f"Config source: config.toml ({len(databases)} database(s)) [{src}]"
         )
@@ -496,7 +523,6 @@ def main():
                 )
         except Exception as e:
             logger.warning(f"Could not build Hub snapshot: {e}")
-        hub.sync_metadata(client)
 
     # Record startup time before the governance pass so the first poll catches
     # any changes that occur during the (potentially slow) initial fetch.
@@ -579,25 +605,33 @@ def main():
                                 last_polled[db["id"]] = _utcnow_iso()
                         database_ids = new_database_ids
                         new_rtd_pairs = new_hub_cfg["rtd_pairs"]
+                        # Always reconfigure, even with no pairs: what runs must equal what the Active rows say.
+                        recurring_tasks.configure_pairs(new_rtd_pairs, week_start_day, day_start_hour)
                         if new_rtd_pairs:
-                            recurring_tasks.configure_pairs(new_rtd_pairs, week_start_day, day_start_hour)
-                            rt_defs_id = new_rtd_pairs[0]["definitions_db_id"]
+                            new_defs_id = new_rtd_pairs[0]["definitions_db_id"]
+                            if new_defs_id != rt_defs_id:
+                                last_polled_rtd = None  # different definitions data source: the old snapshot is useless
+                            rt_defs_id = new_defs_id
                             if last_polled_rtd is None:
                                 try:
                                     rtd_pages = client.query_database(rt_defs_id)
                                     rtd_snapshot = {p["id"]: _strip_files(p) for p in rtd_pages}
                                     last_polled_rtd = _utcnow_iso()
                                 except Exception as e:
-                                    logger.error(f"Failed to build RTD snapshot after Hub activation: {e}")
+                                    logger.error(f"Failed to build RTD snapshot after Hub config reload: {e}")
+                        else:
+                            # No Active recurring_tasks table: stop RTD polling until one is Active again.
+                            rt_defs_id = None
+                            last_polled_rtd = None
+                            rtd_snapshot = {}
                         logger.info(
-                            f"Hub activation: reconfigured with {len(database_ids)} database(s), "
-                            f"{len(new_hub_cfg['rtd_pairs'])} RTD pair(s)."
+                            f"Hub config reload: reconfigured with {len(database_ids)} database(s), "
+                            f"{len(new_rtd_pairs)} RTD pair(s)."
                         )
-                    logger.info("Running governance: Hub row(s) activated.")
+                    logger.info("Running governance: Hub config changed (row activated, edited or deactivated).")
                     gov_created = run_governance(client)
                     if gov_created:
                         _init_pass_on_pages(client, gov_created, snapshots)
-                    hub.sync_metadata(client)
                     if rt_defs_id and last_polled_rtd is not None:
                         try:
                             rtd_pages = client.query_database(rt_defs_id)
@@ -622,7 +656,6 @@ def main():
             gov_created = run_governance(client)
             if gov_created:
                 _init_pass_on_pages(client, gov_created, snapshots)
-            hub.sync_metadata(client)
             # Refresh RTD snapshot post-governance so bot-written Bot Notes become
             # the new baseline and don't re-trigger governance next poll.
             if rt_defs_id and last_polled_rtd is not None:
@@ -649,7 +682,6 @@ def main():
                 gov_created = run_governance(client)
                 if gov_created:
                     _init_pass_on_pages(client, gov_created, snapshots)
-                hub.sync_metadata(client)
                 # Refresh RTD snapshot so bot-written Bot Notes don't re-trigger governance.
                 try:
                     rtd_pages = client.query_database(rt_defs_id)

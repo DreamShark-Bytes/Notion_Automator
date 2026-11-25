@@ -107,16 +107,61 @@ copy config_example.toml config.toml
 notepad config.toml
 ```
 
-At minimum, set your integration token and add one `[[databases]]` block for each database you want to automate:
+At minimum, set your integration token (see "Where the token goes" below) and add one `[[databases]]` block for each database you want to automate:
 
 ```toml
-token = "ntn_your_token_here"
-
 [[databases]]
 id = "your-database-id"
 ```
 
+**Where the token goes.** The token lives in `config_secrets.toml`, next to `config.toml`, so the config file holds no secret and can be shared or read freely. Copy `config_secrets_example.toml` to `config_secrets.toml` and replace the placeholder (`token = "ntn_..."`). `config_secrets.toml` is gitignored. Restrict it so only you and the service can read it: on Linux `chmod 600 config_secrets.toml` (the daemon logs a warning if it is group- or world-readable); on Windows `install-service.ps1` runs `icacls` on it for you. The file is plain text on purpose: an unattended daemon has to be able to read it at boot, so an encryption key would have to sit next to it. To keep it elsewhere, start the daemon with `--secrets PATH`. There is no environment variable, because a stale one would silently override the file. At startup the log says where the token came from (`Notion token source: ...`; the value is never logged). If the daemon will not start, check the log: a missing token names the path it looked at, and a malformed file reports the line and column. Do not paste the token into a prompt or a command run through an AI assistant. A `token = "..."` line in `config.toml` still works as a deprecated fallback and logs a warning.
+
 Enable individual features per database by adding flags to the block. See each feature section below for the exact flags.
+
+**Notion API version.** The daemon uses Notion API version `2026-03-11` by default. To use a different one, add `notion_version = "2025-09-03"` (or `"2022-06-28"`) to `config.toml`. Version differences are described in Notion's upgrade guides: [2025-09-03](https://developers.notion.com/guides/get-started/upgrade-guide-2025-09-03) (databases become data sources) and [2026-03-11](https://developers.notion.com/guides/get-started/upgrade-guide-2026-03-11) (`archived` becomes `in_trash`). The database IDs in `config.toml` keep working on the new versions as long as the database has a single data source. Requires `Notion_API` v1.4.0 or later (`pip install -r requirements.txt`).
+
+### Setting up the Configuration Hub (optional)
+
+**Starting without the Hub.** Leave `config_hub_data_source_id` out of `config.toml` and the daemon runs from the settings in `config.toml` alone. Without the Hub there is no Report, Warnings or Errors in Notion: problems go to the log. The Hub is worth setting up once you want those and want to change behavior without editing files or restarting.
+
+The Hub lets you change behavior in Notion instead of editing `config.toml`. It is two Notion data sources, which you create yourself (the bot never creates them, so it also never needs a parent page):
+
+1. **Duplicate the template** (a Notion page with both data sources already set up; link to be added with the first release). If you cannot use the template, create the two data sources by hand with the columns below.
+2. Share both with your integration (Notion: `...` > Connections).
+3. Copy each data source ID (Notion app: open the data source, three-dots menu top right > More > Developer > Copy data source ID) into `config.toml` as `config_hub_data_source_id` and `status_data_source_id`.
+4. Start the daemon. The data sources may be shared with other tools: the Automator only ever reads and writes its own rows. It finds them by the page IDs saved in `config_hub_state.toml` (`automator_config_page_id`, `automator_status_page_id`), then by the default names `Automator` and `Automator Notion Status`; if neither matches it creates them. The new config row is created without a Status, so it is inert until you set it to `Active`. Edit the TOML in its code block, then set Status to `Active`. You can rename the rows once the IDs are saved.
+
+**Config data source** (the Automator uses one row; other tools can keep theirs in the same data source):
+
+| Column | Type | Notes |
+|---|---|---|
+| Name | Title | Anything |
+| Status | Status | Needs an option named `Active`; any other options (for example `Inactive`) work. Only `Active` rows are applied |
+| Errors | Text | Bot-written. Cleared when resolved |
+| Warnings | Text | Bot-written. Cleared when resolved |
+| Last verified time | Date | Optional. You add it; the bot never creates it. After a governance pass with no failures, the bot sets it on each Active row that read without errors. An old date means the bot has not confirmed that row lately. Must be a Date property: Notion does not let the bot write a "Last edited time" property |
+
+The row's page body holds exactly one code block of TOML. The bot never edits it:
+
+```toml
+[[property_automations]]          # one block per task data source
+name = "tasks"
+data_source_id = "..."
+closed_date_property = "Closed Date"
+reopen_count_property = "Reopen Count"
+update_count_properties = ["Due Date"]
+first_value_properties = ["Due Date", "Status"]
+
+[recurring_tasks]
+definitions_data_source_id = "..."
+tasks_data_source_id = "..."
+inherited_properties = ["Priority", "Effort"]
+non_completion_statuses = ["Cancelled", "Skipped"]
+```
+
+Leave a key out to switch that feature off. Put `#` in front of every line of a block to switch the block off. Lists are arrays, so a property name may contain commas. Editing an Active row, or switching a row to Active, makes the daemon re-read the config and run a governance pass.
+
+**Status data source** (optional; the Automator uses one row, created by the bot; other tools can keep theirs here): columns `Name` (Title), `Status` (Status; needs an option named `Active`, and any other value pauses all automation), `Last Poll` (Date), `Last Governance Run` (Date), `Errors` (Text), `Warnings` (Text). Other columns are for health details the bot will fill in.
 
 ### 5. Test It
 
@@ -409,7 +454,7 @@ If all N repetitions of an activity happen at the same scheduled event (e.g. a w
 The system supports one Anchor Day per series definition. To track a recurring activity that happens on two specific days per week, create two separate definitions — one anchored to Tuesday, one to Thursday — each with `Once per period`. Using `Minimum 2 per period` with no anchor would give you a due date spanning the full period but would not enforce the specific days.
 
 **Applying RTD config changes immediately:**
-Changing an RTD's `Period`, `Cadence Type`, or `N Cadence` doesn't trigger governance right away — the change takes effect at the next daemon startup or daily governance cron. To apply it immediately without waiting: set the RTD's Status to inactive, wait one poll cycle (default 60s), then set it back to Active. The Status → Active transition triggers an immediate governance run that drift-corrects all affected tasks. A one-click Force Governance option is planned as part of the Automation Hub.
+Changing an RTD's `Period`, `Cadence Type`, or `N Cadence` doesn't trigger governance right away — the change takes effect at the next daemon startup or daily governance cron. To apply it immediately without waiting: set the RTD's Status to inactive, wait one poll cycle (default 60s), then set it back to Active. The Status → Active transition triggers an immediate governance run that drift-corrects all affected tasks. A one-click Force Governance option is planned as part of the Configuration Hub.
 
 **Protecting a customized Responsibility task from auto-cancellation:**
 If you edit a specific recurring task instance — renaming it, changing the due date, scoping it to a particular case — you may not want the grace period cron to cancel it on schedule. Check `Ignore Grace Period (Recurring Task)` directly on that task. The bot will skip it during every grace period evaluation for as long as it stays open. When you close it, the next task in the series is created fresh with the checkbox unchecked, so normal behavior resumes automatically.
@@ -467,7 +512,7 @@ Developed in collaboration with [Claude Code](https://claude.ai/code) by Anthrop
 
 See `PLANNED.md` for full details.
 
-- **Automation Hub** — A single Notion page as the daemon's home base. Surfaces health, errors, and warnings; eventually replaces `config.toml` for behavioral settings that change frequently.
+- **Configuration Hub** (formerly "Automation Hub") — A set of Notion pages as the daemon's home base. Surfaces health, errors, and warnings; eventually replaces `config.toml` for behavioral settings that change frequently.
 - **Extended Cadence** — Support for cadences spanning multiple periods (bi-weekly, quarterly, etc.) with a simplified picker and a Custom mode.
 - **Notifications** — Outbound webhook support (Discord, Telegram) for alerts on governance events.
 - **Change Tracking** — Opt-in field change log with old/new values and timestamps, feeding into reporting tools.

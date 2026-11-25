@@ -1,13 +1,29 @@
 # Notion Automator Configuration
 # Run: python daemon.py
 
-# Your Notion integration token (Settings → Integrations → New integration)
-token = "ntn_your_token_here"
+# Your Notion integration token is NOT stored in this file. Put it in config_secrets.toml next to this file
+# (copy config_secrets_example.toml; README: "Where the token goes").
+# Deprecated fallback (the daemon logs a warning): put it here instead.
+# token = "ntn_your_token_here"
 
-# Optional: Notion page ID for the Automation Hub.
-# Create a blank Notion page, paste its ID here, and the bot will scaffold the Hub on first run.
-# Remove or leave blank to run without Hub features (log-only mode).
-# automation_hub_page_id = "your-hub-page-id-here"
+# Optional: Notion API version sent with every request. Default: "2026-03-11".
+# Requires Notion_API v1.4.0 or later. Older: "2025-09-03" (databases became data sources) and
+# "2022-06-28" (the original version; breaks if a database gains a second data source).
+# Upgrade guides: https://developers.notion.com/guides/get-started/upgrade-guide-2025-09-03
+#                 https://developers.notion.com/guides/get-started/upgrade-guide-2026-03-11
+# notion_version = "2026-03-11"
+
+# Optional: the Configuration Hub, where behavior is configured in Notion instead of below
+# (README: "Setting up the Configuration Hub"). If config_hub_data_source_id is not set, the daemon reads
+# the [[databases]] / [recurring_tasks] fallback at the bottom of this file.
+#
+# Data source IDs, not database IDs: in the Notion app open the data source, three-dots (top right),
+# More, Developer, Copy data source ID. Share both data sources with your integration.
+# The data source where config rows live (one row per config, TOML in the row's page body). The bot adds
+# an inert example row if it is empty.
+# config_hub_data_source_id = "your-config-data-source-id"# Optional: the data source for the Automator status row (default title "Automator Notion Status"). It holds
+# the kill switch (any Status other than Active pauses all automation). Without it there is no kill switch.
+# status_data_source_id = "your-status-data-source-id"
 
 # Seconds between polls (applies to all databases)
 poll_interval = 60
@@ -29,3 +45,19 @@ week_start = "Sunday"
 # Case-insensitive. If absent, falls back to a built-in list covering common
 # variations of "cancelled", "skipped", etc.
 non_completion_statuses = ["Cancelled", "Skipped", "Missed", "Ignored", "Abandoned", "Purchased", "Bought"]
+
+# ---- Fallback: used only when no Hub key above is set ----
+# Database IDs: in the Notion app open the data source, three-dots (top right), More, Developer.
+# Keep non_completion_statuses above (top-level keys must come before any [table]).
+#
+# [[databases]]
+# id                  = "your-task-database-id"
+# closed_date         = true                 # stamps "Closed Date" when a task is completed
+# reopen_count        = true                 # counts reopens in "Reopen Count" (needs closed_date)
+# first_value_fields  = ["Due Date"]         # writes "First Due Date" once
+# update_count_fields = ["Due Date"]         # increments "Due Date Update Count" on each change
+#
+# [recurring_tasks]
+# enabled           = true
+# definitions_db_id = "your-definitions-database-id"
+# tasks_db_id       = "your-task-database-id"

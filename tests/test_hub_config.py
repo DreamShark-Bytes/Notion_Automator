@@ -1,4 +1,4 @@
-"""Tests for hub.py pure-function helpers: _parse_csv, _is_valid_db_id, and duplicate pair detection."""
+"""Tests for hub._is_valid_db_id and recurring_tasks duplicate pair detection."""
 import sys
 import os
 import logging
@@ -6,38 +6,6 @@ import logging
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import hub
-
-
-def test_parse_csv_basic():
-    assert hub._parse_csv("A, B, C") == ["A", "B", "C"]
-
-
-def test_parse_csv_whitespace():
-    assert hub._parse_csv("  A ,  B ,C  ") == ["A", "B", "C"]
-
-
-def test_parse_csv_empty_string():
-    assert hub._parse_csv("") == []
-
-
-def test_parse_csv_blank_whitespace():
-    assert hub._parse_csv("   ") == []
-
-
-def test_parse_csv_single_token():
-    assert hub._parse_csv("Priority") == ["Priority"]
-
-
-def test_parse_csv_trailing_comma():
-    assert hub._parse_csv("A, B,") == ["A", "B"]
-
-
-def test_parse_csv_quoted_with_comma():
-    assert hub._parse_csv('"Field, A", B') == ["Field, A", "B"]
-
-
-def test_parse_csv_quoted_multiple():
-    assert hub._parse_csv('"One, Two", "Three, Four", Five') == ["One, Two", "Three, Four", "Five"]
 
 
 def test_is_valid_db_id_plain_32_hex():
@@ -99,6 +67,14 @@ def test_configure_pairs_single_pair():
     )
     assert len(recurring_tasks._rtd_pairs) == 1
     assert "a" * 32 in recurring_tasks._pair_by_tasks_db
+
+
+def test_configure_pairs_with_no_pairs_stops_every_pair():
+    """A config read with no Active recurring_tasks table must stop the running pairs (no restart needed)."""
+    recurring_tasks.configure_pairs([_make_pair("a" * 32, "b" * 32)], week_start_day=0, day_start_hour=3)
+    assert recurring_tasks._rtd_pairs
+    recurring_tasks.configure_pairs([], week_start_day=0, day_start_hour=3)
+    assert recurring_tasks._rtd_pairs == [] and recurring_tasks._pair_by_tasks_db == {}
 
 
 def test_configure_pairs_duplicate_tasks_db(caplog):

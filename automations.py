@@ -74,7 +74,7 @@ def _get_db_schema(client: "NotionClient", db_id: str) -> dict[str, str]:
     key = db_id.replace("-", "")
     if key not in _db_schema_cache:
         try:
-            db = client.get_database(db_id)
+            db = client.get_schema(db_id)
             _db_schema_cache[key] = {
                 name: prop.get("type", "unknown")
                 for name, prop in db.get("properties", {}).items()
@@ -393,6 +393,14 @@ def auto_last_edited_note(_client, page: dict, prev_page: dict | None) -> dict:
 
     return {}
 
+# ------------------------------------------------------------------ #
+#  Automation: if timebox/session "Ends", calculate time (minutes)
+# ------------------------------------------------------------------ #
+
+def auto_calculate_time_when_ended(_client, page: dict, prev_page: dict | None) -> dict:
+    """
+    If a page "Ends" and there is a datetime field Filled in (example: currently on a break) 
+    """
 
 # ------------------------------------------------------------------ #
 #  Registry — add/remove automations here

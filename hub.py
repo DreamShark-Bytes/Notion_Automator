@@ -1,23 +1,26 @@
 """
 hub.py
-Automation Hub integration: finds or creates the Hub's 3 child databases on startup,
-persists their IDs to config_hub.toml, and exposes helpers for all Hub-reading/writing paths.
+Configuration Hub integration. Configuration lives in a Notion data source ("config data source"): one row per
+config, with the TOML in a code block in the row's page body. Daemon health lives in a second data source
+("status data source"). Both are named by data source ID in config.toml (`config_hub_data_source_id`,
+`status_data_source_id`); the user creates them (README: "Setting up the Configuration Hub").
 
 Public API:
-    init(client, hub_page_id, daemon_version="")  — call once at daemon startup
-    is_available()                                  — True if Hub initialised successfully
-    build_snapshot(client)                          — build initial Hub row snapshot + kill-switch state
-    poll_for_changes(client, snapshot)              — diff Hub rows; return governance trigger + kill-switch state
-    sync_metadata(client)                           — refresh Name/icon on rows from their Database IDs
+    init(client, config_ds_id, status_ds_id="", daemon_version="")  — call once at daemon startup
+    is_available()                                                   — True if the Hub initialised successfully
+    validate_hub_schema(client)                                      — log problems with either data source's columns
+    read_config(client)                                              — parse Active rows into the daemon's config dict
+    build_snapshot(client)                                           — initial row snapshot + kill-switch state
+    poll_for_changes(client, snapshot)                               — diff rows; governance trigger + kill switch
 """
 
 from __future__ import annotations
 import logging
+import os
+import re
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
-
-import requests
 
 if TYPE_CHECKING:
     from notion_api import NotionClient
@@ -32,196 +35,82 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# ------------------------------------------------------------------ #
-#  Config file path
-# ------------------------------------------------------------------ #
-
-HUB_CONFIG_PATH = "config_hub.toml"
 
 # ------------------------------------------------------------------ #
-#  Database title constants
+#  Constants
 # ------------------------------------------------------------------ #
 
-_AUTO_DB_TITLE   = "Automated Databases Config"
-_RTD_DB_TITLE    = "Recurring Task Definitions (RTD) Config"
-_STATUS_DB_TITLE = "Hub Status"
+# Bot-owned file holding the page IDs of the Automator's own rows (other tools share the same data sources).
+HUB_CONFIG_PATH = "config_hub_state.toml"
+_CONFIG_PAGE_KEY = "automator_config_page_id"
+_STATUS_PAGE_KEY = "automator_status_page_id"
 
-# Hub Status row — bot-created, single row, fully bot-managed.
-_STATUS_ROW_NAME = "Hub Status"
+# Status row — bot-created, fully bot-managed. Default title (the user may rename the page).
+_STATUS_ROW_NAME = "Automator Notion Status"
 _STATUS_ROW_ICON = {"type": "emoji", "emoji": "🌡️"}
 
-# ------------------------------------------------------------------ #
-#  Status option sets
-# ------------------------------------------------------------------ #
-
-# Automated Databases and RTD Config — full task-board-style options.
-_STATUS_OPTIONS_FULL = [
-    {"name": "Not started",  "color": "gray",   "group": "To-do"},
-    {"name": "Active",       "color": "green",  "group": "In progress"},
-    {"name": "On hold",      "color": "yellow", "group": "In progress"},
-    {"name": "Discontinued", "color": "red",    "group": "Complete"},
-]
-
-# Hub Status — kill switch only.
-_STATUS_OPTIONS_HUB = [
-    {"name": "Inactive", "color": "red",   "group": "To-do"},
-    {"name": "Active",   "color": "green", "group": "In progress"},
-    
-]
-
-# ------------------------------------------------------------------ #
-#  Database schemas
-# ------------------------------------------------------------------ #
-
-_AUTO_DB_SCHEMA: dict = {
-    "Name":               {"title": {}, "description": "Bot-written: the database title, refreshed each governance pass."},
-    "Status":             {
-        "status": {"options": _STATUS_OPTIONS_FULL},
-        "description": """\
-Controls whether the bot monitors this database.
-Not started → not yet configured.
-Active → bot is monitoring and applying automations.
-On hold → temporarily paused.
-Discontinued → permanently stopped."""
-    },
-    "Health":             {
-        "formula": {"expression": 'if(not empty(prop("Errors")), "🆘", "") + if(not empty(prop("Warnings")), "⚠️", "")'},
-        "description": """\
-🆘 = active errors.
-⚠️ = active warnings.
-Empty = all clear."""
-    },
-    "Database ID":        {"rich_text": {}, "description": "Notion database ID for the task database to monitor. Bot reloads config when this changes."},
-    "Closed Date Property":  {"rich_text": {}, "description": "Property name to stamp with the close timestamp when a task moves to Done (e.g. 'Closed Date'). Empty = disabled."},
-    "Reopen Count Property": {"rich_text": {}, "description": "Property name to increment each time a task is reopened (e.g. 'Reopen Count'). Requires Closed Date Property to be set. Empty = disabled."},
-    "Update Count Properties":{"rich_text": {}, "description": "Comma-separated property names to count updates on (e.g. 'Due Date'). Bot increments '[Property] Update Count' each time the value changes."},
-    "First Value Properties": {"rich_text": {}, "description": "Comma-separated property names to snapshot on first observation (e.g. 'Due Date, Status'). Bot writes 'First [Property]' once and never overwrites it."},
-    "Errors":             {"rich_text": {}, "description": "Bot-written. Active errors for this database — cleared automatically when resolved."},
-    "Warnings":           {"rich_text": {}, "description": "Bot-written. Active warnings for this database — cleared automatically when resolved."},
-}
-_AUTO_DB_DESC = (
-    "Each row is a Notion task database the bot monitors. "
-    "Enter the Database ID, configure automation properties, then set Status → Active. "
-    "Bot refreshes Name automatically from the database. Empty config properties = feature disabled."
+# Row the bot adds to an empty config data source, as a worked example. Created without a Status so the data source's own default applies (its options vary).
+_EXAMPLE_ROW_NAME = "Automator"
+_EXAMPLE_ROW_INTRO = (
+    "Notion Automator reads the TOML code block below when this row's Status is Active. "
+    "Put the data source IDs of your task databases in it (Notion app: open the data source, three-dots menu "
+    "(top right) > More > Developer > Copy data source ID). Remove the leading # to switch a line or block on. "
+    "The bot never edits the code block; it reports problems in the Errors and Warnings columns."
 )
+_EXAMPLE_TOML = """\
+# One [[property_automations]] block per task data source.
+# To switch one off, put a # in front of every line of the block.
+# [[property_automations]]
+# name = "tasks"
+# data_source_id = "paste-the-data-source-id-here"
+# closed_date_property = "Closed Date"
+# reopen_count_property = "Reopen Count"
+# update_count_properties = ["Due Date"]
+# first_value_properties = ["Due Date", "Status"]
 
-_RTD_DB_SCHEMA: dict = {
-    "Name":                    {"title": {}, "description": "Bot-written: a label for this recurring task setup, refreshed each governance pass."},
-    "Status":                  {
-        "status": {"options": _STATUS_OPTIONS_FULL},
-        "description": """\
-Controls whether the bot runs recurring task governance for this setup.
-Not started → not yet configured.
-Active → governance enabled.
-On hold → temporarily paused.
-Discontinued → permanently stopped."""
-    },
-    "Health":                  {
-        "formula": {"expression": 'if(not empty(prop("Errors")), "🆘", "") + if(not empty(prop("Warnings")), "⚠️", "")'},
-        "description": """\
-🆘 = active errors.
-⚠️ = active warnings.
-Empty = all clear."""
-    },
-    "Definitions DB":          {"rich_text": {}, "description": "Notion database ID for the Recurring Task Definitions (RTD) database. Bot also writes the database name here for readability."},
-    "Tasks DB":                {"rich_text": {}, "description": "Notion database ID for the task database where recurring tasks are created. Bot also writes the database name here for readability."},
-    "Inherited Properties from Prev Task": {"rich_text": {}, "description": "Comma-separated property names to copy from the previous task occurrence when a new recurring task is created (e.g. 'Priority, Effort, Area'). Leave blank to inherit nothing. The new task's title always comes from the RTD Name — it cannot be inherited from the previous task. Validated against the live schema at startup — typos or renamed properties are flagged as warnings."},
-    "non_completion_statuses": {"rich_text": {}, "description": "Comma-separated status names treated as failed or skipped attempts rather than completions (e.g. 'Cancelled, Skipped'). If blank, falls back to the built-in list: Cancelled, Canceled, Skipped, Missed, Ignored, Abandoned."},
-    "Errors":                  {"rich_text": {}, "description": "Bot-written. Active errors from recurring task governance — cleared automatically when resolved."},
-    "Warnings":                {"rich_text": {}, "description": "Bot-written. Active warnings from recurring task governance — cleared automatically when resolved."},
-}
-_RTD_DB_DESC = (
-    "Each row configures recurring task governance for one RTD database + task database pair. "
-    "Enter Definitions DB and Tasks DB IDs, configure properties, then set Status → Active. "
-    "Bot refreshes Name automatically from the Definitions DB."
-)
+# Recurring tasks: the definitions data source (RTDs) and the tasks data source they create tasks in.
+# [recurring_tasks]
+# definitions_data_source_id = "paste-the-data-source-id-here"
+# tasks_data_source_id = "paste-the-data-source-id-here"
+# inherited_properties = ["Priority", "Effort", "Area"]
+# non_completion_statuses = ["Cancelled", "Skipped"]
+"""
 
-_STATUS_DB_SCHEMA: dict = {
-    "Name":               {"title": {}, "description": "Static label — 'Hub Status'. Set by the bot on first run."},
-    "Status":             {
-        "status": {"options": _STATUS_OPTIONS_HUB},
-        "description": """\
-Kill switch for all automation.
-Active → bot runs normally.
-Inactive → all automations and governance paused. Bot resumes and runs governance when set back to Active."""
-    },
-    "Health":             {
-        "formula": {"expression": """\
-if(
-	(
-		!empty(prop("Errors"))
-		or if(
-			empty(prop("Last Poll")),
-			false,
-			dateBetween(now(), prop("Last Poll"), "hours") > 8)
-		) or if(
-			empty(prop("Last Governance Run")),
-			false,
-			dateBetween(now(), prop("Last Governance Run"), "hours") > 28
-	),
-	"🆘",
-	""
-) + if(
-	(
-		!empty(prop("Warnings"))
-		or if(
-			empty(prop("Last Poll")),
-			false,
-			(
-				dateBetween(now(), prop("Last Poll"), "hours") > 2
-				) and (
-				dateBetween(now(), prop("Last Poll"), "hours") <= 8
-			)
-		)
-	) or if(
-		empty(prop("Last Governance Run")),
-		false,
-		(
-			dateBetween(now(), prop("Last Governance Run"), "hours") > 24
-		) and (
-			dateBetween(now(), prop("Last Governance Run"), "hours") <= 28
-		)
-	) or empty(prop("Last Poll"))
-		or empty(prop("Last Governance Run")
-	),
-	"⚠️",
-	""
-)"""},
-        "description": """\
-🆘 = active errors, poll >8h stale, or governance >28h stale.
-⚠️ = active warnings, poll 2–8h stale, governance 24–28h stale, or poll/governance dates are empty.
-Empty = all clear."""
-    },
-    "Last Poll":           {"date": {}, "description": "Bot-written: timestamp of the most recent successful poll cycle."},
-    "Last Governance Run": {"date": {}, "description": "Bot-written: timestamp of the most recent governance pass."},
-    "Governance Trigger":  {"select": {"options": [
-        {"name": "server-reset"},
-        {"name": "scheduled"},
-        {"name": "force-governance"},
-    ]}, "description": "Bot-written: what triggered the last governance run — server-reset (startup), scheduled (daily cron), or force-governance (Force Governance checkbox)."},
-    "Daemon Uptime":   {"rich_text": {}, "description": "Bot-written: elapsed time since the daemon process started (e.g. '3d 4h 12m')."},
-    "Machine Uptime":  {"rich_text": {}, "description": "Bot-written: elapsed time since the host machine booted. Read from /proc/uptime on Linux. Blank if unavailable."},
-    "Version":         {"rich_text": {}, "description": "Bot-written: the running daemon version."},
-    "Errors":          {"rich_text": {}, "description": "Bot-written. Active daemon-level errors — cleared automatically when resolved."},
-    "Warnings":        {"rich_text": {}, "description": "Bot-written. Active daemon-level warnings — cleared automatically when resolved."},
+# Columns the bot needs on each data source (name -> Notion property type).
+_REQUIRED_CONFIG_PROPS: dict[str, str] = {
+    "Errors":   "rich_text",
+    "Warnings": "rich_text",
 }
-_STATUS_DB_DESC = (
-    "Daemon health and last-run details. Written by the bot on each governance pass. "
-    "Set Status → Inactive to pause all automation immediately. "
-    "poll_interval, week_start, and day_start_hour are set in config.toml on the server "
-    "and require a daemon restart to change."
-)
+_REQUIRED_STATUS_PROPS: dict[str, str] = {
+    "Last Poll":           "date",
+    "Last Governance Run": "date",
+    "Errors":              "rich_text",
+    "Warnings":            "rich_text",
+}
+
+# Optional date column on the config data source. The bot writes it after a governance pass that finished without
+# errors, for each Active config row that read without errors; the column is never created by the bot.
+_VERIFIED_PROP = "Last verified time"
+
+_PROPERTY_AUTOMATION_KEYS = {
+    "name", "data_source_id", "closed_date_property", "reopen_count_property",
+    "update_count_properties", "first_value_properties",
+}
+_RECURRING_TASKS_KEYS = {
+    "definitions_data_source_id", "tasks_data_source_id", "inherited_properties", "non_completion_statuses",
+}
 
 # ------------------------------------------------------------------ #
 #  Module state — set by init()
 # ------------------------------------------------------------------ #
 
-_auto_db_id:        str | None = None
-_rtd_db_id:         str | None = None
-_status_db_id:      str | None = None
-_hub_page_id:       str | None = None
-_hub_status_row_id: str | None = None
+_config_ds_id:      str | None = None
+_status_ds_id:      str | None = None
+_config_row_ids:    list[str] = []       # the Automator's own config rows; every other row is ignored
+_hub_status_row_id: str | None = None    # the Automator's own status row
 _available:         bool = False
+_clean_row_ids:     set[str] = set()     # Active own config rows whose last read had no errors
+_own_write_times:   dict[str, str] = {}  # row id -> last_edited_time returned by the bot's own write
 
 
 def is_available() -> bool:
@@ -230,7 +119,7 @@ def is_available() -> bool:
 
 
 # ------------------------------------------------------------------ #
-#  config_hub.toml read / write
+#  Config parsing helpers
 # ------------------------------------------------------------------ #
 
 def _normalize_uuid(value: str) -> str:
@@ -242,93 +131,60 @@ def _normalize_uuid(value: str) -> str:
     return value
 
 
-def _load_hub_ids() -> dict:
-    """Read config_hub.toml and return its [databases] section, or {} on any failure.
-    Normalizes all ID values to standard UUID format on load."""
-    try:
-        with open(HUB_CONFIG_PATH, "rb") as f:
-            data = tomllib.load(f)
-        ids = data.get("databases", {})
-        return {k: _normalize_uuid(v) for k, v in ids.items()}
-    except FileNotFoundError:
+SECRETS_FILE_NAME = "config_secrets.toml"
+
+
+def load_secrets(path: str) -> dict:
+    """Read the secrets file. A missing file is not an error (returns {}); a malformed one raises
+    tomllib.TOMLDecodeError, which names a line and column and lands in the log like a bad config.toml does.
+    On POSIX a group- or world-readable file logs a warning (fix: chmod 600); Windows relies on the ACL
+    set by install-service.ps1."""
+    if not os.path.exists(path):
         return {}
-    except Exception as e:
-        logger.warning(f"Could not read {HUB_CONFIG_PATH}: {e} — will re-detect Hub databases.")
-        return {}
+    if os.name != "nt" and os.stat(path).st_mode & 0o077:
+        logger.warning(f"{path} is readable by other users. Run: chmod 600 {path}")
+    with open(path, "rb") as f:
+        return tomllib.load(f)
 
 
-def _save_hub_ids(auto_db_id: str, rtd_db_id: str, status_db_id: str) -> None:
-    """Write the 3 Hub child database IDs to config_hub.toml."""
-    content = (
-        "# Written by daemon at startup. Do not edit unless re-syncing after a database was\n"
-        "# deleted or recreated in Notion. To re-sync: shut down the daemon, update the IDs\n"
-        "# below to match the correct Notion database IDs, then restart.\n"
-        "[databases]\n"
-        f'automated_databases = "{auto_db_id}"\n'
-        f'rtd_config          = "{rtd_db_id}"\n'
-        f'hub_status          = "{status_db_id}"\n'
-    )
-    try:
-        with open(HUB_CONFIG_PATH, "w") as f:
-            f.write(content)
-        logger.info(f"Hub database IDs saved to {HUB_CONFIG_PATH}.")
-    except Exception as e:
-        logger.error(f"Could not write {HUB_CONFIG_PATH}: {e}")
+def resolve_token(cfg: dict, secrets: dict | None = None) -> str | None:
+    """Return the Notion integration token, or None if there is none.
 
-
-# ------------------------------------------------------------------ #
-#  Hub page block scanning
-# ------------------------------------------------------------------ #
-
-def _find_existing_databases(client: "NotionClient", hub_page_id: str) -> dict[str, str]:
+    Order: `token` in the secrets file, then `token` in config.toml (deprecated: it keeps a secret in a file that
+    is also read for ordinary settings, so it logs a warning). The source is logged at startup; the value never is.
+    There is deliberately no environment variable: a stale one would silently override the file.
     """
-    Scan the Hub page's children for child_database blocks.
-    Returns {database_title: database_id}. In Notion, a child_database block's ID
-    is the database's ID, so no separate lookup is needed.
+    from_secrets = str((secrets or {}).get("token") or "").strip()
+    if from_secrets:
+        logger.info("Notion token source: secrets file")
+        return from_secrets
+    from_config = str(cfg.get("token") or "").strip()
+    if from_config:
+        logger.warning(
+            f"Notion token source: `token` in config.toml. This is deprecated: move it to {SECRETS_FILE_NAME} "
+            "(see config_secrets_example.toml) and remove it from config.toml."
+        )
+        return from_config
+    return None
+
+
+DEFAULT_NOTION_VERSION = "2026-03-11"
+_NOTION_VERSION_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def resolve_notion_version(raw) -> str:
+    """Return the Notion API version to use from the config.toml `notion_version` value.
+
+    Missing value -> DEFAULT_NOTION_VERSION. A value that is not a YYYY-MM-DD date is
+    rejected with a warning (Notion would answer every request with a 400).
     """
-    try:
-        blocks = client.get_blocks(hub_page_id)
-    except Exception as e:
-        logger.warning(f"Could not read Hub page blocks: {e}")
-        return {}
-    return {
-        b.get("child_database", {}).get("title", ""): b["id"]
-        for b in blocks
-        if b.get("type") == "child_database"
-    }
-
-
-# ------------------------------------------------------------------ #
-#  Config parsing helpers
-# ------------------------------------------------------------------ #
-
-def _parse_csv(text: str) -> list[str]:
-    """Parse a comma-separated property list from a Hub text field.
-
-    Splits on commas, strips whitespace per token, drops empty tokens.
-    Handles double-quoted tokens for names that contain commas.
-    Returns [] for blank/empty input.
-    """
-    text = (text or "").strip()
-    if not text:
-        return []
-    tokens: list[str] = []
-    current = ""
-    in_quotes = False
-    for ch in text:
-        if ch == '"':
-            in_quotes = not in_quotes
-        elif ch == "," and not in_quotes:
-            token = current.strip()
-            if token:
-                tokens.append(token)
-            current = ""
-        else:
-            current += ch
-    token = current.strip()
-    if token:
-        tokens.append(token)
-    return tokens
+    if raw is None:
+        return DEFAULT_NOTION_VERSION
+    text = str(raw).strip()
+    if _NOTION_VERSION_RE.match(text):
+        return text
+    logger.warning(f"notion_version '{raw}' is not a YYYY-MM-DD date — using {DEFAULT_NOTION_VERSION}.")
+    return DEFAULT_NOTION_VERSION
 
 
 def _is_valid_db_id(text: str) -> bool:
@@ -355,120 +211,317 @@ def _row_status(row: dict) -> str:
     return (row.get("properties", {}).get("Status", {}).get("status", {}) or {}).get("name", "")
 
 
+def _error_detail(e: Exception) -> str:
+    """The exception text plus Notion's own error message when the exception carries an HTTP response."""
+    response = getattr(e, "response", None)
+    try:
+        message = response.json().get("message", "") if response is not None else ""
+    except Exception:
+        message = ""
+    return f"{e} ({message})" if message else str(e)
+
+
+def _same_id(a: str, b: str) -> bool:
+    return a.replace("-", "").lower() == b.replace("-", "").lower()
+
+
+def _is_own_config_row(row: dict) -> bool:
+    return any(_same_id(row["id"], i) for i in _config_row_ids)
+
+
+def _find_own_row(rows: list[dict], cached_id: str | None, name: str) -> dict | None:
+    """The Automator's row among a shared data source's rows: the saved page ID first, then the default Name."""
+    if cached_id:
+        for row in rows:
+            if _same_id(row["id"], cached_id):
+                return row
+    for row in rows:
+        if _get_prop_text(row, "Name") == name:
+            return row
+    return None
+
+
+def _load_hub_ids() -> dict:
+    """Read config_hub_state.toml's [databases] section ({key: page ID}), or {} on any failure. IDs are normalized."""
+    try:
+        with open(HUB_CONFIG_PATH, "rb") as f:
+            ids = tomllib.load(f).get("databases", {})
+        return {k: _normalize_uuid(v) for k, v in ids.items() if isinstance(v, str)}
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        logger.warning(f"Could not read {HUB_CONFIG_PATH}: {e} — will look the Automator's rows up by name.")
+        return {}
+
+
+def _save_hub_ids(config_page_id: str | None, status_page_id: str | None) -> None:
+    text = (
+        "# Written by the daemon. These are the page IDs of the Automator's own rows in the Configuration Hub\n"
+        "# data sources. Other tools' rows in the same data sources are never read or written.\n"
+        "# Edit only to point the daemon at a different row: shut down the daemon, change the ID, restart.\n\n"
+        "[databases]\n"
+        f'{_CONFIG_PAGE_KEY} = "{config_page_id or ""}"\n'
+        f'{_STATUS_PAGE_KEY} = "{status_page_id or ""}"\n'
+    )
+    try:
+        with open(HUB_CONFIG_PATH, "w", encoding="utf-8") as f:
+            f.write(text)
+    except OSError as e:
+        logger.warning(f"Could not write {HUB_CONFIG_PATH}: {e}")
+
+
+def _message_text(messages: list[str]) -> str:
+    """Join messages for a Notion rich_text value (2000 characters per text object)."""
+    return "\n".join(messages)[:1900]
+
+
 # ------------------------------------------------------------------ #
-#  Hub Status row management
+#  Row body parsing (pure; no network)
 # ------------------------------------------------------------------ #
 
-def _ensure_hub_status_row(client: "NotionClient") -> None:
-    """Create the 'Hub Status' row in the Hub Status database if it doesn't exist yet."""
+Problem = tuple[str, str]  # (severity "error" | "warning", message)
+
+
+def _str_list(value, label: str, problems: list[Problem]) -> list[str]:
+    """Return value as a list of non-empty strings, or [] with an error if it is not an array of strings."""
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        problems.append(("error", f"{label} must be an array of text values, for example [\"A\", \"B\"]."))
+        return []
+    return [v.strip() for v in value if v.strip()]
+
+
+def _opt_str(block: dict, key: str, label: str, problems: list[Problem]) -> str | None:
+    value = block.get(key)
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        problems.append(("error", f"{label}: {key} must be text."))
+        return None
+    return value.strip() or None
+
+
+def _data_source_id(block: dict, key: str, label: str, problems: list[Problem]) -> str:
+    """Return the block's ID with dashes removed, or '' (with an error) if it is missing or malformed."""
+    raw = str(block.get(key) or "").replace("-", "").strip()
+    if not raw:
+        problems.append(("error", f"{label}: {key} is empty."))
+        return ""
+    if not _is_valid_db_id(raw):
+        problems.append(("error", f"{label}: {key} is not a valid Notion ID ('{raw}')."))
+        return ""
+    return raw
+
+
+def parse_row_config(text: str) -> tuple[list[dict], dict | None, list[Problem]]:
+    """Parse the TOML from one config row.
+
+    Returns (databases, recurring, problems). `databases` has one dict per valid [[property_automations]] block, in
+    the shape the daemon registers ({"id", "closed_date_field", "reopen_count_field", "first_value_fields",
+    "update_count_fields"}). `recurring` is the [recurring_tasks] table as {"definitions_db_id", "tasks_db_id",
+    "inherited_fields", "non_completion_statuses"}, or None. A block with a missing or malformed ID is skipped and
+    reported as an error; the caller downgrades errors to warnings for rows that are not Active.
+    """
+    problems: list[Problem] = []
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        return [], None, [("error", f"Invalid TOML: {e}")]
+
+    for key in data:
+        if key not in ("property_automations", "recurring_tasks"):
+            problems.append(("warning", f"Unknown top-level key '{key}' ignored."))
+
+    databases: list[dict] = []
+    blocks = data.get("property_automations", [])
+    if not isinstance(blocks, list):
+        problems.append(("error", "property_automations must be written as [[property_automations]] blocks."))
+        blocks = []
+    for i, block in enumerate(blocks, start=1):
+        label = f"property_automations '{block.get('name')}'" if block.get("name") else f"property_automations #{i}"
+        for key in block:
+            if key not in _PROPERTY_AUTOMATION_KEYS:
+                problems.append(("warning", f"{label}: unknown key '{key}' ignored."))
+        ds_id = _data_source_id(block, "data_source_id", label, problems)
+        if not ds_id:
+            continue
+        closed = _opt_str(block, "closed_date_property", label, problems)
+        reopen = _opt_str(block, "reopen_count_property", label, problems)
+        if reopen and not closed:
+            problems.append(("error", f"{label}: reopen_count_property is set but closed_date_property is empty, so Reopen Count will not function."))
+        databases.append({
+            "id":                  ds_id,
+            "closed_date_field":   closed,
+            "reopen_count_field":  reopen,
+            "first_value_fields":  _str_list(block.get("first_value_properties"), f"{label}: first_value_properties", problems),
+            "update_count_fields": _str_list(block.get("update_count_properties"), f"{label}: update_count_properties", problems),
+        })
+
+    recurring = None
+    table = data.get("recurring_tasks")
+    if table is not None:
+        label = "recurring_tasks"
+        if not isinstance(table, dict):
+            problems.append(("error", "recurring_tasks must be a [recurring_tasks] table."))
+        else:
+            for key in table:
+                if key not in _RECURRING_TASKS_KEYS:
+                    problems.append(("warning", f"{label}: unknown key '{key}' ignored."))
+            defs_id = _data_source_id(table, "definitions_data_source_id", label, problems)
+            tasks_id = _data_source_id(table, "tasks_data_source_id", label, problems)
+            if defs_id and tasks_id:
+                recurring = {
+                    "definitions_db_id":       defs_id,
+                    "tasks_db_id":             tasks_id,
+                    "inherited_fields":        _str_list(table.get("inherited_properties"), f"{label}: inherited_properties", problems),
+                    "non_completion_statuses": _str_list(table.get("non_completion_statuses"), f"{label}: non_completion_statuses", problems),
+                }
+    return databases, recurring, problems
+
+
+def _read_row_toml(client: "NotionClient", row_id: str) -> tuple[str | None, str | None]:
+    """Return (toml_text, None) from the row's single code block, or (None, error message)."""
+    blocks = client.get_blocks(row_id)
+    codes = [b for b in blocks if b.get("type") == "code"]
+    if not codes:
+        return None, "No code block found in the row's page body (expected exactly one TOML code block)."
+    if len(codes) > 1:
+        return None, f"Found {len(codes)} code blocks in the row's page body (expected exactly one)."
+    return "".join(t.get("plain_text", "") for t in codes[0]["code"].get("rich_text", [])), None
+
+
+# ------------------------------------------------------------------ #
+#  Status row and example row
+# ------------------------------------------------------------------ #
+
+def _ensure_hub_status_row(client: "NotionClient", cached_id: str | None) -> None:
+    """Find the Automator's status row (saved ID, then default name) or create it. Sets _hub_status_row_id."""
     global _hub_status_row_id
-    if not _available or _status_db_id is None:
+    _hub_status_row_id = None
+    if _status_ds_id is None:
         return
     try:
-        rows = client.query_database(_status_db_id)
-        if rows:
-            _hub_status_row_id = rows[0]["id"]
-            logger.info(f"Hub Status row found ({_hub_status_row_id}).")
+        row = _find_own_row(client.query_database(_status_ds_id), cached_id, _STATUS_ROW_NAME)
+        if row:
+            _hub_status_row_id = row["id"]
+            logger.info(f"Hub: Automator status row found ({_hub_status_row_id}).")
             return
         page = client.create_page(
-            _status_db_id,
-            {
-                "Name":   {"title": [{"text": {"content": _STATUS_ROW_NAME}}]},
-                "Status": {"status": {"name": "Inactive"}},
-            },
+            _status_ds_id,
+            {"Name": {"title": [{"text": {"content": _STATUS_ROW_NAME}}]}},
             icon=_STATUS_ROW_ICON,
         )
         _hub_status_row_id = page["id"]
         logger.info(f"Hub: created '{_STATUS_ROW_NAME}' row ({_hub_status_row_id}).")
     except Exception as e:
-        logger.warning(f"Hub: could not ensure Hub Status row: {e}")
+        logger.warning(f"Hub: could not find or create the Automator status row: {_error_detail(e)}")
 
 
-# ------------------------------------------------------------------ #
-#  Metadata sync
-# ------------------------------------------------------------------ #
+def _ensure_config_row(client: "NotionClient", cached_id: str | None) -> None:
+    """Find the Automator's config row (saved ID, then default name) or create an inert example row.
 
-def sync_metadata(client: "NotionClient") -> None:
-    """
-    Read Automated Databases and RTD Config rows that have Database IDs set,
-    fetch the database name and icon from Notion, and write them back to the Hub rows.
-    Runs for all rows regardless of Status — helps users confirm IDs before activating.
-    Call after init() and after each governance pass.
-    """
-    if not _available:
-        return
-    _sync_auto_db_metadata(client)
-    _sync_rtd_config_metadata(client)
-
-
-def _sync_auto_db_metadata(client: "NotionClient") -> None:
+    The config data source is shared with other tools, so rows that are not the Automator's are left alone."""
+    global _config_row_ids
+    _config_row_ids = []
     try:
-        rows = client.query_database(_auto_db_id)
+        row = _find_own_row(client.query_database(_config_ds_id), cached_id, _EXAMPLE_ROW_NAME)
+        if row:
+            _config_row_ids = [row["id"]]
+            logger.info(f"Hub: Automator config row found ({row['id']}).")
+            return
+        page = client.create_page(
+            _config_ds_id,
+            {"Name": {"title": [{"text": {"content": _EXAMPLE_ROW_NAME}}]}},
+        )
+        client.append_blocks(page["id"], [
+            {"object": "block", "type": "paragraph",
+             "paragraph": {"rich_text": [{"type": "text", "text": {"content": _EXAMPLE_ROW_INTRO}}]}},
+            {"object": "block", "type": "code",
+             "code": {"language": "toml", "rich_text": [{"type": "text", "text": {"content": _EXAMPLE_TOML}}]}},
+        ])
+        _config_row_ids = [page["id"]]
+        logger.warning(
+            f"Hub: no Automator config row was found, so '{_EXAMPLE_ROW_NAME}' was created ({page['id']}). "
+            "Fill in its TOML code block, then set its Status to Active."
+        )
     except Exception as e:
-        logger.warning(f"Hub: could not read Automated Databases rows: {e}")
+        logger.warning(f"Hub: could not find or create the Automator config row: {_error_detail(e)}")
+
+
+def _write_row_messages(client: "NotionClient", row: dict, errors: list[str], warnings: list[str]) -> None:
+    """Write the Errors and Warnings columns of a config row, only when the text changed.
+
+    A write updates the row's last_edited_time, which change detection watches, so unchanged text is never rewritten.
+    """
+    props = {}
+    for column, messages in (("Errors", errors), ("Warnings", warnings)):
+        text = _message_text(messages)
+        if text != _get_prop_text(row, column):
+            props[column] = {"rich_text": [{"text": {"content": text}}] if text else []}
+    if not props:
         return
+    try:
+        _remember_own_write(row["id"], client.update_page_properties(row["id"], props))
+    except Exception as e:
+        logger.warning(f"Hub: could not write Errors/Warnings to config row {row['id']}: {e}")
+
+
+def _remember_own_write(row_id: str, page: dict | None) -> None:
+    """Record the last_edited_time a bot write produced so change detection does not mistake it for a user edit."""
+    edited = (page or {}).get("last_edited_time")
+    if edited:
+        _own_write_times[row_id] = edited
+
+
+def mark_verified(client: "NotionClient", governance_ok: bool) -> None:
+    """
+    Stamp the optional "Last verified time" column on each Active own config row that read without errors.
+    Call after a governance pass; nothing is written when governance reported a failure, so a stale date shows
+    a row the bot has not confirmed lately. Rows without the column are skipped.
+    """
+    if not _available or not governance_ok or not _clean_row_ids:
+        return
+    try:
+        rows = [r for r in client.query_database(_config_ds_id) if _is_own_config_row(r)]
+    except Exception as e:
+        logger.warning(f"Hub: could not read config rows to write '{_VERIFIED_PROP}': {e}")
+        return
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     for row in rows:
-        db_id = _get_prop_text(row, "Database ID").replace("-", "")
-        if not db_id:
+        prop = row.get("properties", {}).get(_VERIFIED_PROP)
+        if row["id"] not in _clean_row_ids or _row_status(row) != "Active" or not prop or prop.get("type") != "date":
             continue
         try:
-            db = client.get_database(db_id)
-            name = "".join(t.get("plain_text", "") for t in db.get("title", []))
-            icon = db.get("icon")
-            props = {"Name": {"title": [{"text": {"content": name}}]}} if name else {}
-            client.update_page_properties(row["id"], props, icon=icon)
-            logger.debug(f"Hub: synced Automated DB '{name}' ({db_id}).")
+            _remember_own_write(row["id"], client.update_page_properties(row["id"], {_VERIFIED_PROP: {"date": {"start": now}}}))
         except Exception as e:
-            logger.warning(f"Hub: could not sync metadata for database '{db_id}': {e}")
-
-
-def _sync_rtd_config_metadata(client: "NotionClient") -> None:
-    try:
-        rows = client.query_database(_rtd_db_id)
-    except Exception as e:
-        logger.warning(f"Hub: could not read RTD Config rows: {e}")
-        return
-    for row in rows:
-        defs_db_id = _get_prop_text(row, "Definitions DB").replace("-", "")
-        if not defs_db_id:
-            continue
-        try:
-            db = client.get_database(defs_db_id)
-            name = "".join(t.get("plain_text", "") for t in db.get("title", []))
-            icon = db.get("icon")
-            props = {"Name": {"title": [{"text": {"content": name}}]}} if name else {}
-            client.update_page_properties(row["id"], props, icon=icon)
-            logger.debug(f"Hub: synced RTD Config '{name}' ({defs_db_id}).")
-        except Exception as e:
-            logger.warning(f"Hub: could not sync RTD Config metadata for definitions DB '{defs_db_id}': {e}")
+            logger.warning(f"Hub: could not write '{_VERIFIED_PROP}' to config row {row['id']}: {e}")
 
 
 # ------------------------------------------------------------------ #
 #  Hub polling — kill switch and governance triggers
 # ------------------------------------------------------------------ #
 
+def _own_status_row(client: "NotionClient") -> dict | None:
+    if not (_status_ds_id and _hub_status_row_id):
+        return None
+    return next((r for r in client.query_database(_status_ds_id) if _same_id(r["id"], _hub_status_row_id)), None)
+
+
 def build_snapshot(client: "NotionClient") -> tuple[dict[str, dict], bool]:
     """
-    Query all Hub database rows and build the initial change-detection snapshot.
+    Build the initial change-detection snapshot of the Automator's own Hub rows.
     Returns (snapshot, hub_is_active).
     Call once after init() — existing Active rows do NOT trigger governance here.
     Raises on network/API errors.
     """
     if not _available:
         return {}, True
-    snapshot: dict[str, dict] = {}
-    hub_is_active = True
-    for db_id, label in (
-        (_auto_db_id,   "Automated Databases"),
-        (_rtd_db_id,    "RTD Config"),
-        (_status_db_id, "Hub Status"),
-    ):
-        rows = client.query_database(db_id)
-        for row in rows:
-            snapshot[row["id"]] = row
-        if label == "Hub Status" and rows:
-            if not any(_row_status(r) == "Active" for r in rows):
-                hub_is_active = False
+    snapshot = {r["id"]: r for r in client.query_database(_config_ds_id) if _is_own_config_row(r)}
+    status = _own_status_row(client)
+    hub_is_active = status is None or _row_status(status) == "Active"
+    if status:
+        snapshot[status["id"]] = status
     logger.info(
         f"Hub snapshot built ({len(snapshot)} row(s)). "
         f"Kill switch: {'armed — automation paused' if not hub_is_active else 'clear'}."
@@ -481,11 +534,13 @@ def poll_for_changes(
     snapshot: dict[str, dict],
 ) -> tuple[dict[str, dict], bool, bool]:
     """
-    Query all Hub database rows, diff against snapshot, and detect status changes.
+    Query the Automator's own Hub rows, diff against snapshot, and detect changes. Other tools' rows in the
+    same data sources are ignored.
     Returns (new_snapshot, should_govern, hub_is_active).
-    - should_govern: True if any Automated DB or RTD Config row (new or existing)
-      transitioned to Active status since the last snapshot.
-    - hub_is_active: True if the Hub Status row is Active (or Hub is unavailable).
+    - should_govern: True if a config row became Active, left Active (its automations must stop), or an Active
+      config row was edited (a body edit changes the row's last_edited_time) since the last snapshot. The caller
+      re-reads the config and applies it, then runs governance.
+    - hub_is_active: True if the Automator's status row is Active (or there is no status data source / row).
       False = kill switch engaged; caller should skip automations this cycle.
     Raises on network/API errors — caller must not update its snapshot on error.
     """
@@ -494,27 +549,28 @@ def poll_for_changes(
 
     new_snapshot = dict(snapshot)
     should_govern = False
-    hub_is_active = True  # default: don't block when Hub Status has no rows
+    hub_is_active = True  # default: don't block when there is no status row
 
-    for db_id, label in (
-        (_auto_db_id, "Automated Databases"),
-        (_rtd_db_id,  "RTD Config"),
-    ):
-        rows = client.query_database(db_id)
-        for row in rows:
-            prev = snapshot.get(row["id"])
-            new_snapshot[row["id"]] = row
-            new_status = _row_status(row)
-            old_status = _row_status(prev) if prev is not None else None
-            if new_status == "Active" and old_status != "Active":
-                kind = "new" if prev is None else "existing"
-                logger.info(
-                    f"Hub: {label} row {row['id']} ({kind}) → Active — triggering governance."
-                )
+    for row in client.query_database(_config_ds_id):
+        if not _is_own_config_row(row):
+            continue
+        prev = snapshot.get(row["id"])
+        new_snapshot[row["id"]] = row
+        if _row_status(row) != "Active":
+            if prev is not None and _row_status(prev) == "Active":
+                logger.info(f"Hub: config row {row['id']} left Active — reloading config (its automations stop).")
                 should_govern = True
+            continue
+        if prev is None or _row_status(prev) != "Active":
+            logger.info(f"Hub: config row {row['id']} ({'new' if prev is None else 'existing'}) → Active — triggering governance.")
+            should_govern = True
+        elif (row.get("last_edited_time") != prev.get("last_edited_time")
+              and row.get("last_edited_time") != _own_write_times.get(row["id"])):
+            logger.info(f"Hub: Active config row {row['id']} was edited — triggering governance.")
+            should_govern = True
 
-    status_rows = client.query_database(_status_db_id)
-    for row in status_rows:
+    row = _own_status_row(client)
+    if row:
         prev = snapshot.get(row["id"])
         new_snapshot[row["id"]] = row
         new_status = _row_status(row)
@@ -522,7 +578,7 @@ def poll_for_changes(
         if new_status != "Active":
             hub_is_active = False
         if new_status == "Active" and old_status is not None and old_status != "Active":
-            logger.info("Hub: kill switch lifted (Hub Status → Active) — triggering governance.")
+            logger.info("Hub: kill switch lifted (status row → Active) — triggering governance.")
             should_govern = True
 
     return new_snapshot, should_govern, hub_is_active
@@ -532,91 +588,53 @@ def poll_for_changes(
 #  Hub schema validation
 # ------------------------------------------------------------------ #
 
-_REQUIRED_AUTO_DB_PROPS: dict[str, str] = {
-    "Database ID":             "rich_text",
-    "Closed Date Property":    "rich_text",
-    "Reopen Count Property":   "rich_text",
-    "Update Count Properties": "rich_text",
-    "First Value Properties":  "rich_text",
-    "Errors":                  "rich_text",
-    "Warnings":                "rich_text",
-}
-_REQUIRED_RTD_DB_PROPS: dict[str, str] = {
-    "Definitions DB":                     "rich_text",
-    "Tasks DB":                           "rich_text",
-    "Inherited Properties from Prev Task":"rich_text",
-    "non_completion_statuses":            "rich_text",
-    "Errors":                             "rich_text",
-    "Warnings":                           "rich_text",
-}
-_REQUIRED_STATUS_DB_PROPS: dict[str, str] = {
-    "Last Poll":           "date",
-    "Last Governance Run": "date",
-    "Errors":              "rich_text",
-    "Warnings":            "rich_text",
-}
-
-
 def validate_hub_schema(client: "NotionClient") -> None:
     """
-    Validate that the 3 Hub child databases have the expected schema.
-    Logs ERROR for missing/wrong-type properties or missing "Active" Status option.
-    Logs WARNING if Hub Status has multiple rows.
+    Validate that the config and status data sources have the expected columns.
+    Logs ERROR for missing/wrong-type properties or a missing "Active" Status option.
     Call once at daemon startup after init().
     """
     if not _available:
         return
 
-    checks = [
-        (_auto_db_id,   "Automated Databases", _REQUIRED_AUTO_DB_PROPS,  True),
-        (_rtd_db_id,    "RTD Config",           _REQUIRED_RTD_DB_PROPS,   True),
-        (_status_db_id, "Hub Status",           _REQUIRED_STATUS_DB_PROPS, True),
-    ]
-    for db_id, label, required_props, needs_active_option in checks:
+    checks = [(_config_ds_id, "Config", _REQUIRED_CONFIG_PROPS)]
+    if _status_ds_id:
+        checks.append((_status_ds_id, "Hub Status", _REQUIRED_STATUS_PROPS))
+    for ds_id, label, required_props in checks:
         try:
-            db = client.get_database(db_id)
+            schema = client.get_schema(ds_id)
         except Exception as e:
-            logger.error(f"Hub schema check: could not read '{label}' database: {e}")
+            logger.error(f"Hub schema check: could not read the '{label}' data source: {e}")
             continue
 
-        props = db.get("properties", {})
-
-        # Check Status property has "Active" option.
-        if needs_active_option:
-            status_prop = props.get("Status", {})
-            options = status_prop.get("status", {}).get("options", [])
-            names = {o.get("name", "") for o in options}
-            if "Active" not in names:
+        props = schema.get("properties", {})
+        names = {o.get("name", "") for o in props.get("Status", {}).get("status", {}).get("options", [])}
+        if "Active" not in names:
+            logger.error(
+                f"Hub schema: '{label}' Status property is missing the 'Active' option. "
+                "The bot cannot gate automations on this data source."
+            )
+        if label == "Config":
+            verified = props.get(_VERIFIED_PROP)
+            if verified is None:
+                logger.info(f"Hub schema: optional '{_VERIFIED_PROP}' (date) is not on the config data source; no verification time is written.")
+            elif verified.get("type") != "date":
                 logger.error(
-                    f"Hub schema: '{label}' Status property is missing the 'Active' option. "
-                    "The bot cannot gate automations on this database."
+                    f"Hub schema: '{_VERIFIED_PROP}' has type '{verified.get('type')}' (expected 'date'). "
+                    "Notion does not let the bot write a 'Last edited time' property; use a Date property."
                 )
-
-        # Check required properties exist with correct type.
         for prop_name, expected_type in required_props.items():
             actual = props.get(prop_name)
             if actual is None:
                 logger.error(
-                    f"Hub schema: '{label}' is missing required property '{prop_name}'. "
-                    "Recreate the Hub databases to restore the expected schema."
+                    f"Hub schema: '{label}' is missing required property '{prop_name}' "
+                    "(README: \"Setting up the Configuration Hub\" lists the columns)."
                 )
             elif actual.get("type") != expected_type:
                 logger.error(
                     f"Hub schema: '{label}' property '{prop_name}' has type "
-                    f"'{actual.get('type')}' (expected '{expected_type}'). "
-                    "Recreate the Hub databases to restore the expected schema."
+                    f"'{actual.get('type')}' (expected '{expected_type}')."
                 )
-
-    # Warn if Hub Status has multiple rows.
-    try:
-        rows = client.query_database(_status_db_id)
-        if len(rows) > 1:
-            logger.warning(
-                f"Hub: Hub Status database has {len(rows)} rows — expected exactly 1. "
-                f"Using the first row ({rows[0]['id']}). Remove extra rows."
-            )
-    except Exception as e:
-        logger.warning(f"Hub schema check: could not count Hub Status rows: {e}")
 
 
 # ------------------------------------------------------------------ #
@@ -625,8 +643,9 @@ def validate_hub_schema(client: "NotionClient") -> None:
 
 def read_config(client: "NotionClient") -> dict | None:
     """
-    Read Active rows from Automated Databases and RTD Config, apply data quality
-    checks, and return a structured config dict for the daemon.
+    Read the Automator's own config row(s) (TOML in the page body), apply data quality checks, write the Errors
+    and Warnings columns of those rows, and return a structured config dict for the daemon. Only Active rows are
+    applied; other tools' rows in the same data source are never read or written.
 
     Returns:
         {
@@ -635,120 +654,53 @@ def read_config(client: "NotionClient") -> dict | None:
           "rtd_pairs": [{"definitions_db_id", "tasks_db_id", "closed_date_field",
                          "non_completion_statuses", "inherited_fields"}, ...],
         }
-    Returns None if Hub is not available.
-    On API errors: logs ERROR and returns None.
+    Returns None if Hub is not available or the rows cannot be read (the daemon keeps its current config).
     """
     if not _available:
         return None
 
     try:
-        auto_rows = client.query_database(_auto_db_id)
-        rtd_rows  = client.query_database(_rtd_db_id)
+        rows = [r for r in client.query_database(_config_ds_id) if _is_own_config_row(r)]
     except Exception as e:
-        logger.error(f"Hub: could not read config rows: {e} — daemon will run with zero databases.")
+        logger.error(f"Hub: could not read config rows: {e} — keeping the current config.")
+        return None
+    if not rows:
+        logger.error(f"Hub: the Automator's config row ({', '.join(_config_row_ids) or 'none'}) is not in the config data source (deleted or moved?) — keeping the current config.")
         return None
 
-    # ---- Automated Databases ----------------------------------------
     databases: list[dict] = []
-    auto_db_by_tasks_id: dict[str, dict] = {}  # tasks_db_id (normalized) -> db config
+    closed_date_by_ds: dict[str, str | None] = {}  # property automation data source -> closed_date_field, any row
+    rtd_raw: list[dict] = []                       # recurring tables from Active rows
+    rtd_inactive: list[dict] = []
+    messages: dict[str, dict[str, list[str]]] = {}  # row id -> {"errors": [...], "warnings": [...]}
 
-    for row in auto_rows:
+    for row in rows:
         row_name = _get_prop_text(row, "Name") or row["id"]
-        status   = _row_status(row)
-        active   = (status == "Active")
+        active = _row_status(row) == "Active"
+        msgs = messages.setdefault(row["id"], {"errors": [], "warnings": []})
 
-        raw_id = _get_prop_text(row, "Database ID").replace("-", "")
+        try:
+            text, body_error = _read_row_toml(client, row["id"])
+        except Exception as e:
+            logger.error(f"Hub: could not read the page body of config row '{row_name}': {e} — keeping the current config.")
+            return None
+        if body_error:
+            dbs, recurring, problems = [], None, [("error", body_error)]
+        else:
+            dbs, recurring, problems = parse_row_config(text)
 
-        if not raw_id:
+        for severity, message in problems:
+            as_error = severity == "error" and active
+            msgs["errors" if as_error else "warnings"].append(message)
+            (logger.error if as_error else logger.warning)(f"Hub: config row '{row_name}': {message}")
+
+        for db_cfg in dbs:
+            closed_date_by_ds[db_cfg["id"]] = db_cfg["closed_date_field"]
             if active:
-                logger.error(f"Hub: Automated Databases row '{row_name}' is Active but Database ID is empty — skipping.")
-            else:
-                logger.warning(f"Hub: Automated Databases row '{row_name}' has no Database ID — incomplete setup.")
-            continue
-
-        if not _is_valid_db_id(raw_id):
-            if active:
-                logger.error(f"Hub: Automated Databases row '{row_name}' has malformed Database ID '{raw_id}' — skipping.")
-            else:
-                logger.warning(f"Hub: Automated Databases row '{row_name}' has malformed Database ID '{raw_id}'.")
-            continue
-
-        closed_date_field  = _get_prop_text(row, "Closed Date Property") or None
-        reopen_count_field = _get_prop_text(row, "Reopen Count Property") or None
-
-        if reopen_count_field and not closed_date_field:
-            if active:
-                logger.error(
-                    f"Hub: Automated Databases row '{row_name}' has Reopen Count Property set "
-                    "but Closed Date Property is empty — Reopen Count will not function."
-                )
-            else:
-                logger.warning(
-                    f"Hub: Automated Databases row '{row_name}' has Reopen Count Property set "
-                    "but Closed Date Property is empty."
-                )
-
-        db_cfg = {
-            "id":                  raw_id,
-            "closed_date_field":   closed_date_field,
-            "reopen_count_field":  reopen_count_field,
-            "first_value_fields":  _parse_csv(_get_prop_text(row, "First Value Properties")),
-            "update_count_fields": _parse_csv(_get_prop_text(row, "Update Count Properties")),
-        }
-        auto_db_by_tasks_id[raw_id] = db_cfg
-
-        if active:
-            databases.append(db_cfg)
-
-    # ---- RTD Config -------------------------------------------------
-    rtd_pairs_raw: list[dict] = []  # Active pairs before duplicate check
-    all_rtd_tasks_ids: list[str] = []  # all rows (any status) for duplicate warn
-
-    for row in rtd_rows:
-        row_name = _get_prop_text(row, "Name") or row["id"]
-        status   = _row_status(row)
-        active   = (status == "Active")
-
-        defs_id  = _get_prop_text(row, "Definitions DB").replace("-", "")
-        tasks_id = _get_prop_text(row, "Tasks DB").replace("-", "")
-
-        missing = []
-        if not defs_id:
-            missing.append("Definitions DB")
-        elif not _is_valid_db_id(defs_id):
-            missing.append(f"Definitions DB (malformed: '{defs_id}')")
-            defs_id = ""
-        if not tasks_id:
-            missing.append("Tasks DB")
-        elif not _is_valid_db_id(tasks_id):
-            missing.append(f"Tasks DB (malformed: '{tasks_id}')")
-            tasks_id = ""
-
-        if missing:
-            label = "Error" if active else "Warning"
-            lvl = logger.error if active else logger.warning
-            lvl(f"Hub: RTD Config row '{row_name}' missing/invalid: {', '.join(missing)} — {'skipping' if active else 'incomplete setup'}.")
-            if active:
-                continue
-
-        if active and defs_id and tasks_id:
-            # Look up closed_date_field from the matching Automated Databases row.
-            closed_date_field = (auto_db_by_tasks_id.get(tasks_id) or {}).get("closed_date_field") or "Closed Date"
-
-            non_comp_raw = _parse_csv(_get_prop_text(row, "non_completion_statuses"))
-            inherited_raw = _parse_csv(_get_prop_text(row, "Inherited Properties from Prev Task"))
-
-            rtd_pairs_raw.append({
-                "definitions_db_id":       defs_id,
-                "tasks_db_id":             tasks_id,
-                "closed_date_field":       closed_date_field,
-                "non_completion_statuses": non_comp_raw,   # list[str]; [] = use built-in defaults
-                "inherited_fields":        inherited_raw,  # list[str]; [] = inherit nothing
-                "_row_name":               row_name,
-            })
-            all_rtd_tasks_ids.append(tasks_id)
-        elif not active and tasks_id:
-            all_rtd_tasks_ids.append(tasks_id)
+                databases.append(db_cfg)
+        if recurring:
+            recurring = {**recurring, "_row_id": row["id"], "_row_name": row_name}
+            (rtd_raw if active else rtd_inactive).append(recurring)
 
     # ---- Duplicate pair detection -----------------------------------
     active_tasks_ids: dict[str, str] = {}   # tasks_db_id -> row_name of first Active pair
@@ -756,55 +708,53 @@ def read_config(client: "NotionClient") -> dict | None:
     duplicate_tasks: set[str] = set()
     duplicate_defs:  set[str] = set()
 
-    for pair in rtd_pairs_raw:
-        t_id = pair["tasks_db_id"]
-        d_id = pair["definitions_db_id"]
+    def _duplicate(row_id: str, text: str) -> None:
+        logger.error(f"Hub: {text}")
+        messages[row_id]["errors"].append(text)
+
+    for pair in rtd_raw:
+        t_id, d_id = pair["tasks_db_id"], pair["definitions_db_id"]
         if t_id in active_tasks_ids:
-            logger.error(
-                f"Hub: RTD Config rows '{active_tasks_ids[t_id]}' and '{pair['_row_name']}' "
-                f"both reference the same Tasks DB ({t_id}). Both pairs disabled. "
-                "Each tasks database must have exactly one Active RTD Config row."
-            )
+            _duplicate(pair["_row_id"],
+                       f"config rows '{active_tasks_ids[t_id]}' and '{pair['_row_name']}' both reference the same "
+                       f"tasks data source ({t_id}). Both pairs disabled. Each tasks data source must have exactly "
+                       "one Active recurring_tasks table.")
             duplicate_tasks.add(t_id)
         else:
             active_tasks_ids[t_id] = pair["_row_name"]
-
         if d_id in active_defs_ids:
-            logger.error(
-                f"Hub: RTD Config rows '{active_defs_ids[d_id]}' and '{pair['_row_name']}' "
-                f"both reference the same Definitions DB ({d_id}). Both pairs disabled."
-            )
+            _duplicate(pair["_row_id"],
+                       f"config rows '{active_defs_ids[d_id]}' and '{pair['_row_name']}' both reference the same "
+                       f"definitions data source ({d_id}). Both pairs disabled.")
             duplicate_defs.add(d_id)
         else:
             active_defs_ids[d_id] = pair["_row_name"]
 
     rtd_pairs = [
-        {k: v for k, v in p.items() if k != "_row_name"}
-        for p in rtd_pairs_raw
+        {
+            "definitions_db_id":       p["definitions_db_id"],
+            "tasks_db_id":             p["tasks_db_id"],
+            "closed_date_field":       closed_date_by_ds.get(p["tasks_db_id"]) or "Closed Date",
+            "non_completion_statuses": p["non_completion_statuses"],   # [] = use built-in defaults
+            "inherited_fields":        p["inherited_fields"],          # [] = inherit nothing
+        }
+        for p in rtd_raw
         if p["tasks_db_id"] not in duplicate_tasks and p["definitions_db_id"] not in duplicate_defs
     ]
 
-    # Warn about inactive rows that share IDs with active pairs.
-    for row in rtd_rows:
-        if _row_status(row) == "Active":
-            continue
-        tasks_id = _get_prop_text(row, "Tasks DB").replace("-", "")
-        defs_id  = _get_prop_text(row, "Definitions DB").replace("-", "")
-        row_name = _get_prop_text(row, "Name") or row["id"]
-        if tasks_id and tasks_id in active_tasks_ids:
-            logger.warning(
-                f"Hub: Inactive RTD Config row '{row_name}' shares Tasks DB ({tasks_id}) "
-                f"with active pair '{active_tasks_ids[tasks_id]}'."
-            )
-        if defs_id and defs_id in active_defs_ids:
-            logger.warning(
-                f"Hub: Inactive RTD Config row '{row_name}' shares Definitions DB ({defs_id}) "
-                f"with active pair '{active_defs_ids[defs_id]}'."
-            )
+    for p in rtd_inactive:
+        for ids, key, label in ((active_tasks_ids, "tasks_db_id", "tasks"), (active_defs_ids, "definitions_db_id", "definitions")):
+            if p[key] in ids:
+                text = f"Inactive config row '{p['_row_name']}' shares its {label} data source ({p[key]}) with active pair '{ids[p[key]]}'."
+                logger.warning(f"Hub: {text}")
+                messages[p["_row_id"]]["warnings"].append(text)
 
-    logger.info(
-        f"Hub config read: {len(databases)} task database(s), {len(rtd_pairs)} RTD pair(s)."
-    )
+    for row in rows:
+        _write_row_messages(client, row, messages[row["id"]]["errors"], messages[row["id"]]["warnings"])
+    _clean_row_ids.clear()
+    _clean_row_ids.update(r["id"] for r in rows if _row_status(r) == "Active" and not messages[r["id"]]["errors"])
+
+    logger.info(f"Hub config read: {len(databases)} task database(s), {len(rtd_pairs)} RTD pair(s).")
     return {"databases": databases, "rtd_pairs": rtd_pairs}
 
 
@@ -812,134 +762,47 @@ def read_config(client: "NotionClient") -> dict | None:
 #  init
 # ------------------------------------------------------------------ #
 
-def init(client: "NotionClient", hub_page_id: str, daemon_version: str = "") -> bool:
+def init(client: "NotionClient", config_ds_id: str, status_ds_id: str = "", daemon_version: str = "") -> bool:
     """
-    Find or create the Hub's 3 child databases. Saves their IDs to config_hub.toml.
-    Creates the 'Hub Status' row if it doesn't exist.
-    Returns True if Hub is ready, False if setup failed (daemon continues without Hub).
+    Check that the config data source (and the optional status data source) can be read, then create the status
+    row and, if the config data source is empty, an inert example row.
+    Returns True if the Hub is ready, False if setup failed (the daemon continues without the Hub).
     Call once at daemon startup after the NotionClient is created.
-    daemon_version is appended to the database description at creation time so users
-    can identify which databases the bot created and when.
     """
-    global _auto_db_id, _rtd_db_id, _status_db_id, _hub_page_id, _available
+    global _config_ds_id, _status_ds_id, _available
 
-    _hub_page_id = hub_page_id
+    _available = False
+    config_id = _normalize_uuid(str(config_ds_id).strip())
+    status_id = _normalize_uuid(str(status_ds_id).strip()) if status_ds_id else None
+    if not _is_valid_db_id(config_id):
+        logger.error("Hub: config_hub_data_source_id in config.toml is not a valid Notion ID — Hub features disabled.")
+        return False
+    if status_id and not _is_valid_db_id(status_id):
+        logger.error("Hub: status_data_source_id in config.toml is not a valid Notion ID — Hub features disabled.")
+        return False
 
     try:
-        # Fast path: config_hub.toml has all 3 IDs.
-        # Verify they're reachable. On intentional removal (404, trashed, wrong parent),
-        # fall through to the scan path. On network errors, mark Hub unavailable and
-        # return immediately — don't scan or create databases for a transient failure.
-        ids = _load_hub_ids()
-        _do_scan = False
-        if all(ids.get(k) for k in ("automated_databases", "rtd_config", "hub_status")):
-            try:
-                db = client.get_database(ids["automated_databases"])
-                if db.get("in_trash") or db.get("archived"):
-                    raise ValueError("database is trashed or archived")
-                parent = db.get("parent", {})
-                if (parent.get("type") != "page_id" or
-                        parent.get("page_id", "").replace("-", "") != hub_page_id.replace("-", "")):
-                    raise ValueError("database is not a child of the Hub page")
-                _auto_db_id   = ids["automated_databases"]
-                _rtd_db_id    = ids["rtd_config"]
-                _status_db_id = ids["hub_status"]
-                _available = True
-                logger.info(
-                    f"Hub loaded from {HUB_CONFIG_PATH}: "
-                    f"auto_db={_auto_db_id}, rtd_db={_rtd_db_id}, status_db={_status_db_id}"
-                )
-                _ensure_hub_status_row(client)
-                return True
-            except ValueError as e:
-                logger.warning(f"Hub database IDs invalid ({e}) — scanning Hub page for existing databases.")
-                _do_scan = True
-            except requests.exceptions.HTTPError as e:
-                if e.response is not None and e.response.status_code == 404:
-                    logger.warning("Hub database not found (404) — scanning Hub page for existing databases.")
-                    _do_scan = True
-                else:
-                    logger.warning(
-                        f"Hub database verification returned HTTP "
-                        f"{e.response.status_code if e.response is not None else '?'}: {e} "
-                        "— Hub disabled for this session."
-                    )
-                    _available = False
-                    return False
-            except Exception as e:
-                logger.warning(
-                    f"Hub database verification failed (network error?): {e} "
-                    "— Hub disabled for this session. Restart the daemon to retry."
-                )
-                _available = False
-                return False
-        else:
-            _do_scan = True
-
-        # Scan path: config_hub.toml missing, incomplete, or IDs unreachable.
-        # Scans the Hub page for existing databases; creates any that are missing.
-        logger.info("Scanning Hub page for existing databases ...")
-        existing = _find_existing_databases(client, hub_page_id)
-
-        creation_stamp = (
-            f"\n\nCreated by Notion Automator{' v' + daemon_version if daemon_version else ''}"
-            f" on {datetime.now().strftime('%Y-%m-%d %H:%M')}."
-        )
-        created_titles: list[str] = []
-
-        def _get_or_create(title: str, schema: dict, description: str) -> str:
-            if title in existing:
-                block_id = existing[title]
-                try:
-                    check = client.get_database(block_id)
-                    if check.get("in_trash") or check.get("archived"):
-                        logger.info(
-                            f"Hub: database '{title}' ({block_id}) is trashed or archived "
-                            "— creating a fresh one."
-                        )
-                    else:
-                        logger.info(f"Hub: found existing database '{title}' ({block_id}).")
-                        return block_id
-                except Exception as e:
-                    logger.warning(
-                        f"Hub: could not verify database '{title}' ({block_id}): {e} "
-                        "— creating a fresh one."
-                    )
-            logger.info(f"Hub: creating database '{title}' ...")
-            db = client.create_database(
-                hub_page_id, title, schema,
-                description=description + creation_stamp,
-                is_inline=True,
-            )
-            db_id = db["id"]
-            logger.info(f"Hub: created '{title}' ({db_id}).")
-            created_titles.append(title)
-            return db_id
-
-        _auto_db_id   = _get_or_create(_AUTO_DB_TITLE,   _AUTO_DB_SCHEMA,   _AUTO_DB_DESC)
-        _rtd_db_id    = _get_or_create(_RTD_DB_TITLE,    _RTD_DB_SCHEMA,    _RTD_DB_DESC)
-        _status_db_id = _get_or_create(_STATUS_DB_TITLE, _STATUS_DB_SCHEMA, _STATUS_DB_DESC)
-
-        _save_hub_ids(_auto_db_id, _rtd_db_id, _status_db_id)
-        _available = True
-
-        if created_titles:
-            logger.warning(
-                "=" * 60 + "\n"
-                f"  HUB SETUP: {len(created_titles)} new database(s) created:\n"
-                + "".join(f"    - {t}\n" for t in created_titles)
-                + "  Add rows to Automated Databases and RTD Config, set Database IDs,\n"
-                "  then set Status → Active when ready.\n"
-                + "=" * 60
-            )
-
-        logger.info(
-            f"Hub ready: auto_db={_auto_db_id}, rtd_db={_rtd_db_id}, status_db={_status_db_id}"
-        )
-        _ensure_hub_status_row(client)
-        return True
-
+        for key, ds_id in (("config_hub_data_source_id", config_id), ("status_data_source_id", status_id)):
+            if ds_id:
+                client.get_schema(ds_id)
     except Exception as e:
-        logger.error(f"Hub initialisation failed: {e} — Hub features disabled for this session.")
-        _available = False
+        logger.error(
+            f"Hub: could not read the data source named by {key}: {_error_detail(e)} — Hub features disabled for this session. "
+            "Check the ID, and that the integration has access to it (Notion: ... > Connections)."
+        )
         return False
+
+    _config_ds_id, _status_ds_id = config_id, status_id
+    _available = True
+    if not status_id:
+        logger.info("status_data_source_id not set in config.toml — no kill switch or health status.")
+    logger.info(f"Hub ready (Notion Automator v{daemon_version}): config_ds={_config_ds_id}, status_ds={_status_ds_id}")
+
+    ids = _load_hub_ids()
+    _ensure_config_row(client, ids.get(_CONFIG_PAGE_KEY))
+    _ensure_hub_status_row(client, ids.get(_STATUS_PAGE_KEY))
+    config_page = _config_row_ids[0] if _config_row_ids else None
+    if (config_page or "") != ids.get(_CONFIG_PAGE_KEY, "") or (_hub_status_row_id or "") != ids.get(_STATUS_PAGE_KEY, ""):
+        _save_hub_ids(_normalize_uuid(config_page) if config_page else None,
+                      _normalize_uuid(_hub_status_row_id) if _hub_status_row_id else None)
+    return True
