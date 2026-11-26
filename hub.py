@@ -46,7 +46,7 @@ HUB_CONFIG_PATH = "config_hub_state.toml"
 _CONFIG_PAGE_KEY = "automator_config_page_id"
 _OLD_STATUS_PAGE_KEY = "automator_status_page_id"  # written by earlier versions; dropped from the file on the next save
 
-# Row the bot adds to an empty config data source, as a worked example. Created without a Status so the data source's own default applies (its options vary).
+# Row the bot adds to an empty config data source, as a worked example. Its Status is set explicitly to an option that is not Active (see pick_inactive_status), so the data source's default can never start it.
 _EXAMPLE_ROW_NAME = "Automator"
 _EXAMPLE_ROW_INTRO = (
     "Notion Automator reads the TOML code block below when this row's Status is Active. "
@@ -508,6 +508,44 @@ def _read_row_toml(client: "NotionClient", row_id: str) -> tuple[str | None, str
 #  Example row
 # ------------------------------------------------------------------ #
 
+_TODO_GROUP_NAMES = ("to-do", "to do", "todo", "not started")
+
+
+def pick_inactive_status(status_schema: dict) -> str | None:
+    """Name of a Status option that is not "Active", from a status property's schema, or None if there is none.
+
+    Prefers an option in the To-do group (normally "Not started"), then any other non-Active option, in the order
+    Notion lists them. Never guesses a name: it only returns one that the schema lists."""
+    options = [o for o in (status_schema or {}).get("options") or [] if o.get("name")]
+    candidates = [o for o in options if o["name"].strip().lower() != "active"]
+    todo_ids = {oid for g in (status_schema or {}).get("groups") or []
+                if str(g.get("name", "")).strip().lower() in _TODO_GROUP_NAMES for oid in g.get("option_ids") or []}
+    for o in candidates:
+        if o.get("id") in todo_ids:
+            return o["name"]
+    return candidates[0]["name"] if candidates else None
+
+
+def _example_row_properties(client: "NotionClient") -> dict:
+    """Properties for a new example row: the Name, plus an explicit non-Active Status when the schema offers one.
+    If there is none, the row is created without a Status and a warning says the data source's default applies."""
+    props = {"Name": {"title": [{"text": {"content": _EXAMPLE_ROW_NAME}}]}}
+    try:
+        status = client.get_schema(_config_ds_id).get("properties", {}).get("Status", {}).get("status", {})
+    except Exception as e:
+        logger.warning(f"Hub: could not read the Status options ({_error_detail(e)}); the new row gets the data source's default Status.")
+        return props
+    name = pick_inactive_status(status)
+    if name:
+        props["Status"] = {"status": {"name": name}}
+    else:
+        logger.warning(
+            "Hub: the Status property has no option other than Active, so the new row gets the data source's "
+            f"default (\"{status.get('default_option')}\"). Add another option such as Not started."
+        )
+    return props
+
+
 def _ensure_config_row(client: "NotionClient", cached_id: str | None) -> None:
     """Find the Automator's config row (saved ID, then default name) or create an inert example row.
 
@@ -520,10 +558,7 @@ def _ensure_config_row(client: "NotionClient", cached_id: str | None) -> None:
             _config_row_ids = [row["id"]]
             logger.info(f"Hub: Automator config row found ({row['id']}).")
             return
-        page = client.create_page(
-            _config_ds_id,
-            {"Name": {"title": [{"text": {"content": _EXAMPLE_ROW_NAME}}]}},
-        )
+        page = client.create_page(_config_ds_id, _example_row_properties(client))
         client.append_blocks(page["id"], [
             {"object": "block", "type": "paragraph",
              "paragraph": {"rich_text": [{"type": "text", "text": {"content": _EXAMPLE_ROW_INTRO}}]}},

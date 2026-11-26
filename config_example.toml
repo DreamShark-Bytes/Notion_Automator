@@ -29,6 +29,11 @@
 # when an edit is applied. Default 300 (5 minutes).
 # hub_settle_seconds = 300
 
+# Optional, for the live check you run by hand (tests/live_sandbox.py, never run automatically): the page that is
+# dedicated to throwaway test data. Put a callout at its top that says so; the script never edits it. Its token,
+# `sandbox_token`, goes in config_secrets.toml and must differ from the normal token.
+# sandbox_page_id = "your-sandbox-page-id"
+
 # Seconds between polls (applies to all databases)
 poll_interval = 60
 

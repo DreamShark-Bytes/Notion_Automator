@@ -46,13 +46,13 @@ def test_example_contains_only_placeholders():
     assert not re.search(r"(secret_|ntn_)[A-Za-z0-9]{20,}", text)
 
 
-def test_every_top_level_key_is_read_by_the_daemon():
+def test_every_top_level_key_is_read_by_the_daemon_or_the_live_sandbox_script():
     read_keys: set[str] = set()
-    for name in ("daemon.py", "hub.py"):
+    for name in ("daemon.py", "hub.py", os.path.join("tests", "live_sandbox.py")):
         with open(os.path.join(ROOT, name), encoding="utf-8") as f:
             read_keys |= set(re.findall(r'cfg\.get\("(\w+)"', f.read()))
     documented = set(tomllib.loads(_uncomment(_text())).keys())
-    assert documented - read_keys == set(), f"documented but never read by daemon.py: {documented - read_keys}"
+    assert documented - read_keys == set(), f"documented but never read by daemon.py, hub.py or tests/live_sandbox.py: {documented - read_keys}"
 
 
 def test_every_database_flag_is_understood():

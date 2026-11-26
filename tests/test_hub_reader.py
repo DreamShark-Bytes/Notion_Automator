@@ -336,11 +336,45 @@ def test_init_creates_the_row_and_saves_its_id(fresh):
     assert hub.init(client, CFG, daemon_version="9.9.9") is True
     assert hub.is_available() and hub._config_ds_id == cfg_id
     (ds, props, _), = client.created
-    assert ds == cfg_id and "Status" not in props  # the data source's options vary; the default applies
+    assert ds == cfg_id and "Status" not in props  # no Status property in this fake schema: nothing to pick from
     (page_id, children), = client.appended
     assert [c["type"] for c in children] == ["paragraph", "code"] and children[1]["code"]["language"] == "toml"
     assert hub._config_row_ids == ["new-0"]
     assert _saved(fresh) == {"automator_config_page_id": "new-0"}
+
+
+STATUS_SCHEMA = {
+    "options": [
+        {"id": "o1", "name": "Active"}, {"id": "o2", "name": "Done"}, {"id": "o3", "name": "On hold"}, {"id": "o4", "name": "Not started"},
+    ],
+    "groups": [
+        {"name": "To-do", "option_ids": ["o4"]}, {"name": "In progress", "option_ids": ["o1", "o3"]}, {"name": "Complete", "option_ids": ["o2"]},
+    ],
+    "default_option": "Active",
+}
+
+
+def test_pick_inactive_status_prefers_the_todo_group_and_never_returns_active():
+    assert hub.pick_inactive_status(STATUS_SCHEMA) == "Not started"
+    no_todo = {"options": [{"id": "o1", "name": "active"}, {"id": "o3", "name": "On hold"}], "groups": []}
+    assert hub.pick_inactive_status(no_todo) == "On hold"  # case-insensitive match on Active
+    assert hub.pick_inactive_status({"options": [{"id": "o1", "name": "Active"}]}) is None
+    assert hub.pick_inactive_status({}) is None and hub.pick_inactive_status(None) is None
+
+
+def test_init_sets_an_explicit_non_active_status_even_when_the_default_is_active(fresh):
+    client = FakeClient(schemas={hub._normalize_uuid(CFG): {"properties": {"Status": {"type": "status", "status": STATUS_SCHEMA}}}})
+    assert hub.init(client, CFG) is True
+    (_, props, _), = client.created
+    assert props["Status"] == {"status": {"name": "Not started"}}
+
+
+def test_init_warns_when_active_is_the_only_status(fresh, caplog):
+    only_active = {"options": [{"id": "o1", "name": "Active"}], "groups": [], "default_option": "Active"}
+    client = FakeClient(schemas={hub._normalize_uuid(CFG): {"properties": {"Status": {"type": "status", "status": only_active}}}})
+    assert hub.init(client, CFG) is True
+    (_, props, _), = client.created
+    assert "Status" not in props and "no option other than Active" in caplog.text
 
 
 def test_other_tools_rows_are_never_adopted_and_the_automator_row_is_created(fresh):
