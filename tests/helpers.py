@@ -25,7 +25,7 @@ def make_task(
     due_end=None,
     closed_date=None,
     def_id="test-def-id",
-    db_id="test-tasks-db",
+    data_source_id="test-tasks-db",
     name=None,
 ):
     """Build a minimal Notion task page dict for unit tests."""
@@ -37,7 +37,7 @@ def make_task(
     closed_val = {"start": closed_date, "end": None} if closed_date else None
     return {
         "id": task_id,
-        "parent": {"database_id": db_id},
+        "parent": {"data_source_id": data_source_id, "database_id": "test-parent-database"},
         "properties": {
             "Name": {
                 "type": "title",

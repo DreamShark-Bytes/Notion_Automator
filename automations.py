@@ -27,6 +27,7 @@ from recurring_tasks import (
     _now_local_iso,
     _parse_closed_dt,
     auto_recurring_tasks,
+    page_data_source_id,
     run_recurring_governance,
 )
 
@@ -40,50 +41,50 @@ if TYPE_CHECKING:
 #  Per-database automation config registry
 # ------------------------------------------------------------------ #
 
-_db_configs: dict[str, dict] = {}  # database_id -> [[databases]] config entry
+_data_source_configs: dict[str, dict] = {}  # data source ID (no dashes, lowercase) -> automation config entry
 
-# Tracks databases for which a due_date_tracking deprecation warning has fired,
-# so the warning appears once per database rather than on every page.
+# Tracks data sources for which a due_date_tracking deprecation warning has fired,
+# so the warning appears once per data source rather than on every page.
 _deprecation_warned: set[str] = set()
 
 
-def register_db(db_id: str, cfg: dict) -> None:
-    """Register a database's automation config. Called once per database at daemon startup."""
-    _db_configs[db_id.replace("-", "")] = cfg
+def register_data_source(data_source_id: str, cfg: dict) -> None:
+    """Register a data source's automation config. Called for each configured data source when config is applied."""
+    _data_source_configs[data_source_id.replace("-", "").lower()] = cfg
+
+
+def clear_data_sources() -> None:
+    """Forget every registered data source (config is applied declaratively: what is registered equals what is configured)."""
+    _data_source_configs.clear()
 
 
 def _flags(page: dict) -> dict:
-    """Return the automation flags for the database this page belongs to."""
-    db_id = page.get("parent", {}).get("database_id", "").replace("-", "")
-    return _db_configs.get(db_id, {})
-
-
-def _db_id_of(page: dict) -> str:
-    return page.get("parent", {}).get("database_id", "")
+    """Return the automation flags for the data source this page belongs to."""
+    return _data_source_configs.get(page_data_source_id(page), {})
 
 
 # ------------------------------------------------------------------ #
 #  Per-database Notion schema cache
 # ------------------------------------------------------------------ #
 
-_db_schema_cache: dict[str, dict[str, str]] = {}  # db_id -> {field_name -> field_type}
+_schema_cache: dict[str, dict[str, str]] = {}  # data source ID -> {field_name -> field_type}
 
 
-def _get_db_schema(client: "NotionClient", db_id: str) -> dict[str, str]:
-    """Return {field_name: field_type} for the given database. Cached per daemon run."""
-    key = db_id.replace("-", "")
-    if key not in _db_schema_cache:
+def _get_schema(client: "NotionClient", data_source_id: str) -> dict[str, str]:
+    """Return {field_name: field_type} for the given data source. Cached per daemon run."""
+    key = data_source_id.replace("-", "").lower()
+    if key not in _schema_cache:
         try:
-            db = client.get_schema(db_id)
-            _db_schema_cache[key] = {
+            db = client.get_schema(data_source_id)
+            _schema_cache[key] = {
                 name: prop.get("type", "unknown")
                 for name, prop in db.get("properties", {}).items()
             }
-            logger.debug(f"Loaded schema for database {db_id}: {len(_db_schema_cache[key])} fields.")
+            logger.debug(f"Loaded schema for data source {data_source_id}: {len(_schema_cache[key])} fields.")
         except Exception as e:
-            logger.warning(f"Could not load schema for database {db_id}: {e}")
-            _db_schema_cache[key] = {}
-    return _db_schema_cache[key]
+            logger.warning(f"Could not load schema for data source {data_source_id}: {e}")
+            _schema_cache[key] = {}
+    return _schema_cache[key]
 
 
 # ------------------------------------------------------------------ #
@@ -140,7 +141,7 @@ def _build_first_value_write(
     return None
 
 
-def _resolve_tracking_fields(flags: dict, config_key: str, db_id: str) -> list[str]:
+def _resolve_tracking_fields(flags: dict, config_key: str, data_source_id: str) -> list[str]:
     """
     Return the list of field names to track for a given config key.
     Handles the due_date_tracking -> first_value_fields/update_count_fields migration.
@@ -150,10 +151,10 @@ def _resolve_tracking_fields(flags: dict, config_key: str, db_id: str) -> list[s
         return fields
 
     if flags.get("due_date_tracking"):
-        if db_id not in _deprecation_warned:
-            _deprecation_warned.add(db_id)
+        if data_source_id not in _deprecation_warned:
+            _deprecation_warned.add(data_source_id)
             logger.warning(
-                f"Database {db_id}: 'due_date_tracking = true' is deprecated. "
+                f"Data source {data_source_id}: 'due_date_tracking = true' is deprecated. "
                 f"Replace with 'first_value_fields = [\"Due Date\"]' and "
                 f"'update_count_fields = [\"Due Date\"]' in config.toml."
             )
@@ -271,12 +272,12 @@ def auto_first_value(client: "NotionClient", page: dict, prev_page: dict | None)
     rich_text/text, url, email, phone_number.
     """
     flags = _flags(page)
-    db_id = _db_id_of(page)
-    fields = _resolve_tracking_fields(flags, "first_value_fields", db_id)
+    data_source_id = page_data_source_id(page)
+    fields = _resolve_tracking_fields(flags, "first_value_fields", data_source_id)
     if not fields:
         return {}
 
-    schema = _get_db_schema(client, db_id)
+    schema = _get_schema(client, data_source_id)
     updates = {}
 
     for field_name in fields:
@@ -330,12 +331,12 @@ def auto_update_count(client: "NotionClient", page: dict, prev_page: dict | None
     with a one-time warning per database.
     """
     flags = _flags(page)
-    db_id = _db_id_of(page)
-    fields = _resolve_tracking_fields(flags, "update_count_fields", db_id)
+    data_source_id = page_data_source_id(page)
+    fields = _resolve_tracking_fields(flags, "update_count_fields", data_source_id)
     if not fields:
         return {}
 
-    schema = _get_db_schema(client, db_id)
+    schema = _get_schema(client, data_source_id)
     updates = {}
 
     for field_name in fields:
@@ -413,6 +414,7 @@ AUTOMATIONS = [
     # auto_recurring_tasks must remain last — it creates Notion pages and should
     # run after all field-stamping automations have settled their updates.
     auto_recurring_tasks,
+    page_data_source_id,
     # auto_last_edited_note,   # <- uncomment to enable
 ]
 

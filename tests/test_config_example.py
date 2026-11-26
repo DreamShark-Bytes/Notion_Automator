@@ -33,7 +33,7 @@ def test_example_with_every_option_uncommented_still_parses():
     assert cfg["notion_version"] == "2026-03-11"
     assert "automation_hub_page_id" not in cfg  # no longer read
     assert cfg["config_hub_data_source_id"] == "your-config-data-source-id"
-    assert cfg["status_data_source_id"] == "your-status-data-source-id"
+    assert "status_data_source_id" not in cfg  # no separate status data source any more
     assert cfg["non_completion_statuses"] and all(isinstance(x, str) for x in cfg["non_completion_statuses"])
     assert cfg["databases"][0]["id"] == "your-task-database-id"
     assert cfg["recurring_tasks"]["enabled"] is True

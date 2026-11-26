@@ -3,7 +3,7 @@ Tests for auto_first_value and auto_update_count.
 
 These cover the generic field tracking automations that replaced
 auto_due_date_update_count. Tests use a mocked client and injected
-_db_configs / _db_schema_cache to avoid real API calls.
+_data_source_configs / _schema_cache to avoid real API calls.
 """
 import pytest
 from unittest.mock import MagicMock
@@ -69,13 +69,13 @@ def make_page(status="Not started", due_start=None, due_end=None,
 
 @pytest.fixture(autouse=True)
 def inject_config(monkeypatch):
-    monkeypatch.setattr(automations, "_db_configs", {
+    monkeypatch.setattr(automations, "_data_source_configs", {
         DB_ID.replace("-", ""): {
             "first_value_fields":  ["Due Date", "Status"],
             "update_count_fields": ["Due Date", "Status"],
         }
     })
-    monkeypatch.setattr(automations, "_db_schema_cache", {
+    monkeypatch.setattr(automations, "_schema_cache", {
         DB_ID.replace("-", ""): TASK_SCHEMA,
     })
     monkeypatch.setattr(automations, "_deprecation_warned", set())
@@ -125,7 +125,7 @@ class TestAutoFirstValue:
 
     def test_skips_field_when_target_column_absent(self, monkeypatch):
         schema_without_first_status = {k: v for k, v in TASK_SCHEMA.items() if k != "First Status"}
-        monkeypatch.setattr(automations, "_db_schema_cache", {
+        monkeypatch.setattr(automations, "_schema_cache", {
             DB_ID.replace("-", ""): schema_without_first_status,
         })
         page = make_page(status="In progress")
@@ -133,7 +133,7 @@ class TestAutoFirstValue:
         assert "First Status" not in result
 
     def test_no_op_when_no_fields_configured(self, monkeypatch):
-        monkeypatch.setattr(automations, "_db_configs", {
+        monkeypatch.setattr(automations, "_data_source_configs", {
             DB_ID.replace("-", ""): {}
         })
         page = make_page(due_start="2026-06-17T03:00:00+00:00")
@@ -141,7 +141,7 @@ class TestAutoFirstValue:
         assert result == {}
 
     def test_backward_compat_due_date_tracking(self, monkeypatch):
-        monkeypatch.setattr(automations, "_db_configs", {
+        monkeypatch.setattr(automations, "_data_source_configs", {
             DB_ID.replace("-", ""): {"due_date_tracking": True}
         })
         page = make_page(due_start="2026-06-17T03:00:00+00:00")
@@ -205,7 +205,7 @@ class TestAutoUpdateCount:
         assert "Status Update Count" not in result
 
     def test_backward_compat_due_date_tracking(self, monkeypatch):
-        monkeypatch.setattr(automations, "_db_configs", {
+        monkeypatch.setattr(automations, "_data_source_configs", {
             DB_ID.replace("-", ""): {"due_date_tracking": True}
         })
         prev = make_page(due_start="2026-06-16T03:00:00+00:00", due_count=0)
@@ -215,7 +215,7 @@ class TestAutoUpdateCount:
 
     def test_deprecation_warning_fires_once(self, monkeypatch, caplog):
         import logging
-        monkeypatch.setattr(automations, "_db_configs", {
+        monkeypatch.setattr(automations, "_data_source_configs", {
             DB_ID.replace("-", ""): {"due_date_tracking": True}
         })
         page = make_page(due_start="2026-06-17T03:00:00+00:00", due_count=0)

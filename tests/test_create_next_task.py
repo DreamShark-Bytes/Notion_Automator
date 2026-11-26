@@ -24,8 +24,8 @@ OPEN_STATUS = "Not started"
 
 
 _TEST_PAIR = {
-    "definitions_db_id":       "b" * 32,
-    "tasks_db_id":             "test-tasks-db",
+    "definitions_data_source_id":       "b" * 32,
+    "tasks_data_source_id":             "test-tasks-db",
     "closed_date_field":       "Closed Date",
     "non_completion_statuses": None,
     "inherited_fields":        [],
@@ -38,8 +38,8 @@ def module_state(monkeypatch):
     monkeypatch.setattr(recurring_tasks, "_day_start_hour", 0)
     monkeypatch.setattr(recurring_tasks, "_get_status_group", fake_status_group)
     recurring_tasks.configure_pairs([{
-        "definitions_db_id":       "b" * 32,
-        "tasks_db_id":             "test-tasks-db",
+        "definitions_data_source_id":       "b" * 32,
+        "tasks_data_source_id":             "test-tasks-db",
         "closed_date_field":       "Closed Date",
         "non_completion_statuses": [],
         "inherited_fields":        [],

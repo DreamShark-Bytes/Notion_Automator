@@ -27,15 +27,26 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def page_data_source_id(page: dict) -> str:
+    """The data source a page belongs to, as a lowercase ID without dashes ('' if the page has no parent).
+
+    A database can hold several data sources, and a page's parent carries both `data_source_id` and `database_id`
+    (API version 2025-09-03 and later), so only `data_source_id` tells the sources apart. `database_id` is the
+    fallback for API versions whose pages have no `data_source_id` (a database then has one source)."""
+    parent = (page or {}).get("parent") or {}
+    return (parent.get("data_source_id") or parent.get("database_id") or "").replace("-", "").lower()
+
+
 # ------------------------------------------------------------------ #
 #  Module state — set via configure_pairs()
 # ------------------------------------------------------------------ #
 
-# Each pair dict: {definitions_db_id, tasks_db_id, closed_date_field,
+# Each pair dict: {definitions_data_source_id, tasks_data_source_id, closed_date_field,
 #                  non_completion_statuses (frozenset|None), inherited_fields (list[str]),
 #                  _task_schema (set[str]|None)}
 _rtd_pairs: list[dict] = []
-_pair_by_tasks_db: dict[str, dict] = {}  # normalized tasks_db_id -> pair dict
+_pair_by_tasks_data_source: dict[str, dict] = {}  # normalized tasks_data_source_id -> pair dict
 
 _week_start_day: int = 0  # 0 = Monday … 6 = Sunday; configurable via week_start in config.toml
 _day_start_hour: int = 0  # Hour (0–23) when the logical day begins; midnight to this hour is "yesterday"
@@ -84,18 +95,18 @@ def configure_pairs(
     """Configure all RTD pairs and timing settings. Call once at daemon startup.
 
     Each pair dict must contain:
-        definitions_db_id (str), tasks_db_id (str), closed_date_field (str),
+        definitions_data_source_id (str), tasks_data_source_id (str), closed_date_field (str),
         non_completion_statuses (list[str] — empty uses built-in defaults),
         inherited_fields (list[str] — empty = inherit nothing).
 
     week_start_day: 0 = Monday (default/ISO), 6 = Sunday.
     day_start_hour: whole hour (0–23) when the logical day begins.
     """
-    global _rtd_pairs, _pair_by_tasks_db, _week_start_day, _day_start_hour
+    global _rtd_pairs, _pair_by_tasks_data_source, _week_start_day, _day_start_hour
     _week_start_day = week_start_day
     _day_start_hour = day_start_hour
     _rtd_pairs = []
-    _pair_by_tasks_db = {}
+    _pair_by_tasks_data_source = {}
 
     seen_tasks: dict[str, str] = {}
     seen_defs:  dict[str, str] = {}
@@ -103,12 +114,12 @@ def configure_pairs(
     dup_defs:   set[str] = set()
 
     for p in pairs:
-        t_id = p["tasks_db_id"].replace("-", "")
-        d_id = p["definitions_db_id"].replace("-", "")
+        t_id = p["tasks_data_source_id"].replace("-", "").lower()
+        d_id = p["definitions_data_source_id"].replace("-", "").lower()
         label = p.get("_row_name") or f"tasks={t_id}"
         if t_id in seen_tasks:
             logger.error(
-                f"configure_pairs: tasks_db_id '{t_id}' shared by pairs "
+                f"configure_pairs: tasks_data_source_id '{t_id}' shared by pairs "
                 f"'{seen_tasks[t_id]}' and '{label}' — both disabled."
             )
             dup_tasks.add(t_id)
@@ -116,7 +127,7 @@ def configure_pairs(
             seen_tasks[t_id] = label
         if d_id in seen_defs:
             logger.error(
-                f"configure_pairs: definitions_db_id '{d_id}' shared by pairs "
+                f"configure_pairs: definitions_data_source_id '{d_id}' shared by pairs "
                 f"'{seen_defs[d_id]}' and '{label}' — both disabled."
             )
             dup_defs.add(d_id)
@@ -124,8 +135,8 @@ def configure_pairs(
             seen_defs[d_id] = label
 
     for p in pairs:
-        t_id = p["tasks_db_id"].replace("-", "")
-        d_id = p["definitions_db_id"].replace("-", "")
+        t_id = p["tasks_data_source_id"].replace("-", "").lower()
+        d_id = p["definitions_data_source_id"].replace("-", "").lower()
         if t_id in dup_tasks or d_id in dup_defs:
             continue
         raw_statuses = p.get("non_completion_statuses") or []
@@ -134,15 +145,15 @@ def configure_pairs(
             if raw_statuses else None
         )
         pair: dict = {
-            "definitions_db_id":       d_id,
-            "tasks_db_id":             t_id,
+            "definitions_data_source_id":       d_id,
+            "tasks_data_source_id":             t_id,
             "closed_date_field":       p.get("closed_date_field") or "Closed Date",
             "non_completion_statuses": norm_statuses,  # None = use built-in NON_COMPLETION_STATUSES
             "inherited_fields":        list(p.get("inherited_fields") or []),
             "_task_schema":            None,
         }
         _rtd_pairs.append(pair)
-        _pair_by_tasks_db[t_id] = pair
+        _pair_by_tasks_data_source[t_id] = pair
 
     logger.info(
         f"configure_pairs: {len(_rtd_pairs)} RTD pair(s) active "
@@ -150,12 +161,12 @@ def configure_pairs(
     )
 
 
-def init(definitions_db_id: str, tasks_db_id: str, week_start_day: int = 0, day_start_hour: int = 3) -> None:
+def init(definitions_data_source_id: str, tasks_data_source_id: str, week_start_day: int = 0, day_start_hour: int = 3) -> None:
     """Backward-compat wrapper for single-pair setups. Prefer configure_pairs()."""
     configure_pairs(
         [{
-            "definitions_db_id":       definitions_db_id,
-            "tasks_db_id":             tasks_db_id,
+            "definitions_data_source_id":       definitions_data_source_id,
+            "tasks_data_source_id":             tasks_data_source_id,
             "closed_date_field":       "Closed Date",
             "non_completion_statuses": [],
             "inherited_fields":        [],
@@ -171,14 +182,14 @@ def _load_task_db_schema(client: "NotionClient", pair: dict) -> None:
     Called lazily on the first governance/automation run. Subsequent calls are no-ops.
     If the query fails, optional fields are written unconditionally (safe fallback).
     """
-    if pair.get("_task_schema") is not None or not pair.get("tasks_db_id"):
+    if pair.get("_task_schema") is not None or not pair.get("tasks_data_source_id"):
         return
     try:
-        db = client.get_schema(pair["tasks_db_id"])
+        db = client.get_schema(pair["tasks_data_source_id"])
         pair["_task_schema"] = set(db.get("properties", {}).keys())
-        logger.info(f"Task DB schema loaded for {pair['tasks_db_id']}: {len(pair['_task_schema'])} properties.")
+        logger.info(f"Task DB schema loaded for {pair['tasks_data_source_id']}: {len(pair['_task_schema'])} properties.")
     except Exception as e:
-        logger.warning(f"Could not load task DB schema for {pair['tasks_db_id']}: {e}")
+        logger.warning(f"Could not load task DB schema for {pair['tasks_data_source_id']}: {e}")
         pair["_task_schema"] = set()
 
 
@@ -312,7 +323,7 @@ def _now_local_iso() -> str:
     return datetime.now().astimezone().isoformat()
 
 
-# Cache: database_id -> {option_id: group_name}
+# Cache: data source ID -> {option_id: group_name}
 _status_group_cache: dict[str, dict[str, str]] = {}
 
 
@@ -325,7 +336,7 @@ def _get_status_group(client: "NotionClient", page: dict | None, status_field: s
         return None
 
     option_id = prop["status"]["id"]
-    db_id = (page.get("parent") or {}).get("database_id")
+    db_id = page_data_source_id(page)
     if not db_id:
         return None
 
@@ -723,12 +734,12 @@ def _count_tasks_in_period(
 
     Used at task creation time when a pre-fetched task list is unavailable.
     """
-    tasks_db_id = pair.get("tasks_db_id")
-    if not tasks_db_id or not current_period_key:
+    tasks_data_source_id = pair.get("tasks_data_source_id")
+    if not tasks_data_source_id or not current_period_key:
         return 0
     try:
         tasks = client.query_database(
-            tasks_db_id,
+            tasks_data_source_id,
             filter_payload={"property": "Recurring Series", "relation": {"contains": definition_id}},
         )
     except Exception as e:
@@ -853,11 +864,11 @@ def _create_next_task(
     # Fetch all tasks for this definition first — used for use_next_period determination,
     # the duplicate guard, and Instance # count.
     fetched_tasks: list[dict] = []
-    tasks_db_id = pair.get("tasks_db_id")
-    if tasks_db_id:
+    tasks_data_source_id = pair.get("tasks_data_source_id")
+    if tasks_data_source_id:
         try:
             fetched_tasks = client.query_database(
-                tasks_db_id,
+                tasks_data_source_id,
                 filter_payload={"property": "Recurring Series", "relation": {"contains": definition_id}},
             )
         except Exception as e:
@@ -1000,11 +1011,11 @@ def _create_next_task(
         props = base_props
 
     # Resolve target database
-    db_id = tasks_db_id
+    db_id = tasks_data_source_id
     if not db_id and closed_task:
-        db_id = closed_task.get("parent", {}).get("database_id")
+        db_id = page_data_source_id(closed_task)
     if not db_id:
-        logger.error("Cannot create recurring task: no tasks database ID available.")
+        logger.error("Cannot create recurring task: no tasks data source ID available.")
         return
 
     rtd_icon = definition.get("icon")
@@ -1083,22 +1094,22 @@ def run_recurring_governance(client: "NotionClient") -> list[dict]:
         if schema and closed_date_field not in schema:
             logger.error(
                 f"CRITICAL: '{closed_date_field}' property not found in task database "
-                f"{pair['tasks_db_id']}. Period logic requires this field."
+                f"{pair['tasks_data_source_id']}. Period logic requires this field."
             )
 
         try:
             definitions = client.query_database(
-                pair["definitions_db_id"],
+                pair["definitions_data_source_id"],
                 filter_payload={"property": RTD_STATUS_FIELD, "status": {"equals": RTD_ACTIVE_STATUS}},
             )
         except Exception as e:
-            logger.error(f"Failed to fetch recurring definitions for pair {pair['definitions_db_id']}: {e}")
+            logger.error(f"Failed to fetch recurring definitions for pair {pair['definitions_data_source_id']}: {e}")
             continue
 
         try:
-            all_tasks = client.query_database(pair["tasks_db_id"])
+            all_tasks = client.query_database(pair["tasks_data_source_id"])
         except Exception as e:
-            logger.error(f"Failed to fetch tasks for pair {pair['tasks_db_id']}: {e}")
+            logger.error(f"Failed to fetch tasks for pair {pair['tasks_data_source_id']}: {e}")
             continue
 
         # Register all RTD pages as examined so Bot Notes are cleared on resolved issues
@@ -1563,8 +1574,8 @@ def auto_recurring_tasks(client: "NotionClient", page: dict, prev_page: dict | N
     Also initializes Period Key, Instance #, Period Target, and Due Date on tasks
     that are linked to a series but were never stamped by the bot.
     """
-    tasks_db_id = page.get("parent", {}).get("database_id", "").replace("-", "")
-    pair = _pair_by_tasks_db.get(tasks_db_id)
+    tasks_data_source_id = page_data_source_id(page)
+    pair =_pair_by_tasks_data_source.get(tasks_data_source_id)
     if pair is None:
         return {}
 

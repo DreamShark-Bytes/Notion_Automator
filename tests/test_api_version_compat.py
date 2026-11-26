@@ -178,19 +178,44 @@ def _response(status: int) -> requests.Response:
 # ------------------------------------------------------------------ #
 
 _DB = "a" * 32
+_DS = "b" * 32
+_DS_2 = "c" * 32  # a second data source in the same database _DB
 _OLD_PARENT = {"type": "database_id", "database_id": _DB}
-_NEW_PARENT = {"type": "data_source_id", "data_source_id": "b" * 32, "database_id": _DB}
+_NEW_PARENT = {"type": "data_source_id", "data_source_id": _DS, "database_id": _DB}
+_NEW_PARENT_2 = {"type": "data_source_id", "data_source_id": _DS_2, "database_id": _DB}
 
 
-@pytest.mark.parametrize("parent", [_OLD_PARENT, _NEW_PARENT])
-def test_automation_flags_found_from_either_parent_shape(parent):
-    automations.register_db(_DB, {"closed_date_field": "Closed Date"})
+@pytest.mark.parametrize("parent, registered_id", [(_OLD_PARENT, _DB), (_NEW_PARENT, _DS)])
+def test_automation_flags_found_from_either_parent_shape(parent, registered_id):
+    """Old API versions: the page parent has only database_id. New ones: data_source_id decides."""
+    automations.register_data_source(registered_id, {"closed_date_field": "Closed Date"})
     try:
         page = {"parent": parent}
         assert automations._flags(page) == {"closed_date_field": "Closed Date"}
-        assert automations._db_id_of(page) == _DB
+        assert recurring_tasks.page_data_source_id(page) == registered_id
     finally:
-        automations._db_configs.pop(_DB, None)
+        automations.clear_data_sources()
+
+
+def test_page_in_second_data_source_of_same_database_gets_no_flags():
+    """Issue #9: two data sources in one database share database_id; only data_source_id tells them apart."""
+    automations.register_data_source(_DS, {"closed_date_field": "Closed Date"})
+    try:
+        assert automations._flags({"parent": _NEW_PARENT}) == {"closed_date_field": "Closed Date"}
+        assert automations._flags({"parent": _NEW_PARENT_2}) == {}
+        # A configured database ID no longer matches a page that reports its data source.
+        automations.clear_data_sources()
+        automations.register_data_source(_DB, {"closed_date_field": "Closed Date"})
+        assert automations._flags({"parent": _NEW_PARENT}) == {}
+    finally:
+        automations.clear_data_sources()
+
+
+def test_page_data_source_id_is_normalized():
+    page = {"parent": {"data_source_id": "AABBCCDD-0000-0000-0000-000000000001"}}
+    assert recurring_tasks.page_data_source_id(page) == "aabbccdd000000000000000000000001"
+    assert recurring_tasks.page_data_source_id({"parent": {}}) == ""
+    assert recurring_tasks.page_data_source_id({}) == ""
 
 
 # ------------------------------------------------------------------ #
@@ -208,31 +233,31 @@ def _fake_client(schema_by_id: dict | None = None, error: Exception | None = Non
 
 
 def test_automations_schema_uses_get_schema_and_caches():
-    automations._db_schema_cache.clear()
+    automations._schema_cache.clear()
     c = _fake_client({"db1": {"properties": {"Due Date": {"type": "date"}, "Status": {"type": "status"}}}})
     try:
-        assert automations._get_db_schema(c, "db1") == {"Due Date": "date", "Status": "status"}
-        automations._get_db_schema(c, "db1")
+        assert automations._get_schema(c, "db1") == {"Due Date": "date", "Status": "status"}
+        automations._get_schema(c, "db1")
         assert c.get_schema.call_count == 1
         c.get_database.assert_not_called()
     finally:
-        automations._db_schema_cache.clear()
+        automations._schema_cache.clear()
 
 
 def test_automations_schema_failure_gives_empty_schema(caplog):
-    automations._db_schema_cache.clear()
+    automations._schema_cache.clear()
     c = _fake_client(error=RuntimeError("boom"))
     try:
         with caplog.at_level(logging.WARNING):
-            assert automations._get_db_schema(c, "db1") == {}
+            assert automations._get_schema(c, "db1") == {}
         assert any("Could not load schema" in r.getMessage() for r in caplog.records)
     finally:
-        automations._db_schema_cache.clear()
+        automations._schema_cache.clear()
 
 
 def test_recurring_task_schema_uses_get_schema():
     c = _fake_client({"tasks": {"properties": {"Due Date": {}, "Priority": {}}}})
-    pair = {"tasks_db_id": "tasks"}
+    pair = {"tasks_data_source_id": "tasks"}
     recurring_tasks._load_task_db_schema(c, pair)
     assert pair["_task_schema"] == {"Due Date", "Priority"}
     c.get_database.assert_not_called()
@@ -242,7 +267,7 @@ def test_recurring_task_schema_uses_get_schema():
 
 def test_recurring_task_schema_failure_gives_empty_set(caplog):
     c = _fake_client(error=RuntimeError("boom"))
-    pair = {"tasks_db_id": "tasks"}
+    pair = {"tasks_data_source_id": "tasks"}
     with caplog.at_level(logging.WARNING):
         recurring_tasks._load_task_db_schema(c, pair)
     assert pair["_task_schema"] == set()
@@ -253,7 +278,7 @@ def test_status_group_lookup_uses_get_schema():
         {"name": "To-do", "option_ids": ["o1"]},
         {"name": "Complete", "option_ids": ["o2", "o3"]},
     ]}}}}
-    c = _fake_client({_DB: schema})
+    c = _fake_client({_DS: schema})
     page = {"parent": _NEW_PARENT, "properties": {"Status": {"status": {"id": "o3", "name": "Done"}}}}
     recurring_tasks._status_group_cache.clear()
     try:
@@ -287,7 +312,6 @@ def _hub_schema(required: dict) -> dict:
 def hub_ids(monkeypatch):
     monkeypatch.setattr(hub, "_available", True)
     monkeypatch.setattr(hub, "_config_ds_id", "config")
-    monkeypatch.setattr(hub, "_status_ds_id", "status")
 
 
 def _hub_client(schemas: dict) -> MagicMock:
@@ -297,10 +321,7 @@ def _hub_client(schemas: dict) -> MagicMock:
 
 
 def _good_schemas() -> dict:
-    return {
-        "config": _hub_schema(hub._REQUIRED_CONFIG_PROPS),
-        "status": _hub_schema(hub._REQUIRED_STATUS_PROPS),
-    }
+    return {"config": _hub_schema(hub._REQUIRED_CONFIG_PROPS)}
 
 
 def test_hub_schema_check_passes_on_a_correct_schema(hub_ids, caplog):
@@ -308,7 +329,7 @@ def test_hub_schema_check_passes_on_a_correct_schema(hub_ids, caplog):
     with caplog.at_level(logging.WARNING, logger="hub"):
         hub.validate_hub_schema(c)
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
-    assert c.get_schema.call_count == 2
+    assert c.get_schema.call_count == 1
     c.get_database.assert_not_called()
 
 
@@ -324,12 +345,12 @@ def test_hub_schema_check_reports_missing_property(hub_ids, caplog):
 
 def test_hub_schema_check_reports_wrong_type(hub_ids, caplog):
     schemas = _good_schemas()
-    schemas["status"]["properties"]["Last Poll"] = {"type": "rich_text"}
+    schemas["config"]["properties"][hub._VERIFIED_PROP] = {"type": "rich_text"}
     with caplog.at_level(logging.ERROR, logger="hub"):
         hub.validate_hub_schema(_hub_client(schemas))
     errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
     assert len(errors) == 1
-    assert "Last Poll" in errors[0] and "rich_text" in errors[0] and "date" in errors[0]
+    assert hub._VERIFIED_PROP in errors[0] and "rich_text" in errors[0] and "date" in errors[0]
 
 
 def test_hub_schema_check_reports_missing_active_option(hub_ids, caplog):
@@ -341,7 +362,7 @@ def test_hub_schema_check_reports_missing_active_option(hub_ids, caplog):
     assert len(errors) == 1 and "Config" in errors[0] and "Active" in errors[0]
 
 
-def test_hub_schema_check_continues_after_a_read_failure(hub_ids, caplog):
+def test_hub_schema_check_reports_a_read_failure(hub_ids, caplog):
     schemas = _good_schemas()
 
     def get_schema(any_id):
@@ -355,7 +376,6 @@ def test_hub_schema_check_continues_after_a_read_failure(hub_ids, caplog):
         hub.validate_hub_schema(c)
     errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
     assert len(errors) == 1 and "could not read the 'Config' data source" in errors[0]
-    assert c.get_schema.call_count == 2
 
 
 def test_hub_schema_check_skipped_when_hub_unavailable(monkeypatch):

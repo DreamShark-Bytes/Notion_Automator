@@ -19,8 +19,8 @@ def _make_pair(
     if non_completion_statuses is not None:
         norm = frozenset(re.sub(r'[^a-z]', '', s.lower()) for s in non_completion_statuses)
     return {
-        "definitions_db_id":       "b" * 32,
-        "tasks_db_id":             "a" * 32,
+        "definitions_data_source_id":       "b" * 32,
+        "tasks_data_source_id":             "a" * 32,
         "closed_date_field":       closed_date_field,
         "reopen_count_field":      reopen_count_field,
         "non_completion_statuses": norm,

@@ -18,12 +18,16 @@
 # the [[databases]] / [recurring_tasks] fallback at the bottom of this file.
 #
 # Data source IDs, not database IDs: in the Notion app open the data source, three-dots (top right),
-# More, Developer, Copy data source ID. Share both data sources with your integration.
+# More, Developer, Copy data source ID. Share the data source with your integration.
 # The data source where config rows live (one row per config, TOML in the row's page body). The bot adds
-# an inert example row if it is empty.
-# config_hub_data_source_id = "your-config-data-source-id"# Optional: the data source for the Automator status row (default title "Automator Notion Status"). It holds
-# the kill switch (any Status other than Active pauses all automation). Without it there is no kill switch.
-# status_data_source_id = "your-status-data-source-id"
+# an inert example row if it has none of its own. A row acts only while its Status is Active; set it to
+# anything else to pause it.
+# config_hub_data_source_id = "your-config-data-source-id"
+
+# Seconds a config row must stay unchanged before the bot acts on an edit, so it does not react while you are
+# still typing. It sets how long the "edited, not applied" Warning waits, and (without a Config Version column)
+# when an edit is applied. Default 300 (5 minutes).
+# hub_settle_seconds = 300
 
 # Seconds between polls (applies to all databases)
 poll_interval = 60

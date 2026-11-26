@@ -17,8 +17,8 @@ from helpers import make_definition
 
 
 _DUMMY_PAIR = {
-    "definitions_db_id":       "b" * 32,
-    "tasks_db_id":             "a" * 32,
+    "definitions_data_source_id":       "b" * 32,
+    "tasks_data_source_id":             "a" * 32,
     "closed_date_field":       "Closed Date",
     "non_completion_statuses": None,
     "inherited_fields":        [],
@@ -44,7 +44,7 @@ def test_skips_and_makes_no_api_calls(type_value):
 @pytest.mark.parametrize("type_value", ["Habit", "Responsibility", "Bad Habit"])
 def test_valid_type_passes_guard(type_value):
     """Valid types proceed past the guard and attempt API calls."""
-    pair = dict(_DUMMY_PAIR, tasks_db_id="test-db-id")
+    pair = dict(_DUMMY_PAIR, tasks_data_source_id="test-db-id")
     client = MagicMock()
     client.query_database.return_value = []
     recurring_tasks._create_next_task(client, None, make_definition(type_value), pair)

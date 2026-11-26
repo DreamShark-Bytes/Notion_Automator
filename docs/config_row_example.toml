@@ -1,0 +1,29 @@
+# Example for the code block in a Configuration Hub config row.
+# Put exactly ONE code block (language: toml) in the row's page body, then set the row's Status to Active.
+# Remove the leading "# " from a line or block to switch it on. Put "# " back to switch it off.
+# The bot never edits this block. Leave a key out to switch that feature off.
+#
+# Data source IDs, not database IDs: in the Notion app open the data source, three-dots menu (top right),
+# More, Developer, Copy data source ID.
+
+# ---------------------------------------------------------------------------
+# Task data sources: one [[property_automations]] block per data source.
+# ---------------------------------------------------------------------------
+# [[property_automations]]
+# name = "tasks"                                  # a label for messages; optional
+# data_source_id = "paste-the-data-source-id-here"
+# closed_date_property = "Closed Date"            # date column the bot stamps when a task is closed
+# reopen_count_property = "Reopen Count"          # number column; needs closed_date_property
+# update_count_properties = ["Due Date"]          # each one gets a "<name> Update Count" column
+# first_value_properties = ["Due Date", "Status"] # each one gets a "First <name>" column
+
+# ---------------------------------------------------------------------------
+# Recurring tasks: the definitions data source (RTDs) and the tasks data source they create tasks in.
+# One [recurring_tasks] table per row; each tasks data source and each definitions data source may
+# appear in only one Active row.
+# ---------------------------------------------------------------------------
+# [recurring_tasks]
+# definitions_data_source_id = "paste-the-data-source-id-here"
+# tasks_data_source_id = "paste-the-data-source-id-here"
+# inherited_properties = ["Priority", "Effort", "Area"]   # copied from the closed task to the next one
+# non_completion_statuses = ["Cancelled", "Skipped"]      # empty or missing = the built-in defaults

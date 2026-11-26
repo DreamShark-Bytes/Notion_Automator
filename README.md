@@ -122,14 +122,16 @@ Enable individual features per database by adding flags to the block. See each f
 
 ### Setting up the Configuration Hub (optional)
 
+New install? `docs/initial_setup.md` walks through it in order. A commented example of the code block with every key is in `docs/config_row_example.toml`.
+
 **Starting without the Hub.** Leave `config_hub_data_source_id` out of `config.toml` and the daemon runs from the settings in `config.toml` alone. Without the Hub there is no Report, Warnings or Errors in Notion: problems go to the log. The Hub is worth setting up once you want those and want to change behavior without editing files or restarting.
 
-The Hub lets you change behavior in Notion instead of editing `config.toml`. It is two Notion data sources, which you create yourself (the bot never creates them, so it also never needs a parent page):
+The Hub lets you change behavior in Notion instead of editing `config.toml`. It is one Notion data source, which you create yourself (the bot never creates it, so it also never needs a parent page):
 
-1. **Duplicate the template** (a Notion page with both data sources already set up; link to be added with the first release). If you cannot use the template, create the two data sources by hand with the columns below.
-2. Share both with your integration (Notion: `...` > Connections).
-3. Copy each data source ID (Notion app: open the data source, three-dots menu top right > More > Developer > Copy data source ID) into `config.toml` as `config_hub_data_source_id` and `status_data_source_id`.
-4. Start the daemon. The data sources may be shared with other tools: the Automator only ever reads and writes its own rows. It finds them by the page IDs saved in `config_hub_state.toml` (`automator_config_page_id`, `automator_status_page_id`), then by the default names `Automator` and `Automator Notion Status`; if neither matches it creates them. The new config row is created without a Status, so it is inert until you set it to `Active`. Edit the TOML in its code block, then set Status to `Active`. You can rename the rows once the IDs are saved.
+1. **Duplicate the template** (a Notion page with the data source already set up; link to be added with the first release). If you cannot use the template, create the data source by hand with the columns below.
+2. Share it with your integration (Notion: `...` > Connections).
+3. Copy the data source ID (Notion app: open the data source, three-dots menu top right > More > Developer > Copy data source ID) into `config.toml` as `config_hub_data_source_id`.
+4. Start the daemon. The data source may be shared with other tools: the Automator only ever reads and writes its own row. It finds it by the page ID saved in `config_hub_state.toml` (`automator_config_page_id`), then by the default name `Automator`; if neither matches it creates one. The new config row is created without a Status, so it is inert until you set it to `Active`. Edit the TOML in its code block, then set Status to `Active`. You can rename the row once the ID is saved. To pause the Automator, set the row's Status to anything but `Active`.
 
 **Config data source** (the Automator uses one row; other tools can keep theirs in the same data source):
 
@@ -140,6 +142,8 @@ The Hub lets you change behavior in Notion instead of editing `config.toml`. It 
 | Errors | Text | Bot-written. Cleared when resolved |
 | Warnings | Text | Bot-written. Cleared when resolved |
 | Last verified time | Date | Optional. You add it; the bot never creates it. After a governance pass with no failures, the bot sets it on each Active row that read without errors. An old date means the bot has not confirmed that row lately. Must be a Date property: Notion does not let the bot write a "Last edited time" property |
+| Config Version (Datetime) | Date | Optional. You add it, and only you set it: set it to now (by hand, or with an "Apply Config" button) when a changed config should be loaded. See "When the config is applied" below |
+| Report | Text | Optional. Bot-written, one line each for the app (`App: Version X, Started: time`, no emoji because it reports no status), the last config read and the last governance pass; the config and governance lines start with an emoji (🟢 fine, 🟡 see Warnings or an edit is being waited on, 🔴 see Errors, ⚪ paused) and a time to the minute with its zone. Times are shown in the time zone of the Config Version value (so they follow the Notion time zone of whoever last set it; this machine's zone until a Config Version with a zone has been read); this is display only and never affects what counts as a changed config. Plain text for you to read; the bot never reads it back |
 
 The row's page body holds exactly one code block of TOML. The bot never edits it:
 
@@ -159,9 +163,26 @@ inherited_properties = ["Priority", "Effort"]
 non_completion_statuses = ["Cancelled", "Skipped"]
 ```
 
-Leave a key out to switch that feature off. Put `#` in front of every line of a block to switch the block off. Lists are arrays, so a property name may contain commas. Editing an Active row, or switching a row to Active, makes the daemon re-read the config and run a governance pass.
+Leave a key out to switch that feature off. Put `#` in front of every line of a block to switch the block off. Lists are arrays, so a property name may contain commas.
 
-**Status data source** (optional; the Automator uses one row, created by the bot; other tools can keep theirs here): columns `Name` (Title), `Status` (Status; needs an option named `Active`, and any other value pauses all automation), `Last Poll` (Date), `Last Governance Run` (Date), `Errors` (Text), `Warnings` (Text). Other columns are for health details the bot will fill in.
+**When the config is applied.** Only a row whose Status is `Active` runs. Whatever is running always equals exactly what the Active rows say, with no daemon restart:
+
+| What you do | What the bot does |
+|---|---|
+| Set Status to `Active` | Reads the code block, applies it, runs a governance pass |
+| Set Status to anything else | Stops everything from that row (its task data sources and recurring pairs) without reading the page. Edits made while it is paused are read when you set it back to `Active` |
+| Set Config Version (Datetime) to a different value (a newer time, or any other) | Reads the code block, applies it, runs a governance pass |
+| Edit the code block without changing Config Version | Nothing is applied. After the row has been unchanged for the settle time (default 5 minutes, `hub_settle_seconds` in `config.toml`) the bot compares the code block with what is running; if it differs, the Warnings column says "Edited but not applied" and why it would not apply (for example a TOML error with its line). Comment, spacing and key-order edits never warn |
+| No Config Version column | An edit is applied once the row has been unchanged for the settle time |
+| Start the daemon | Reads the code block once |
+
+The daily governance pass does not re-read the config, but it does compare each row's code block with what is running (the safety net behind the Warning above).
+
+**Apply Config button (optional, set up once in the Notion app).** The bot cannot create a button's action through the API, so add it by hand: add a Button property named `Apply Config`, give it the action "Edit property" > `Config Version (Datetime)` > set to "Now". After a change, press it. Leaving `Config Version (Datetime)` empty is allowed: the bot then only reads the row when it is activated or the daemon restarts, and warns that nothing will be applied by an edit.
+
+**A config with a problem never stops a working one.** If an apply finds an error (invalid TOML, a bad ID), the config that was already running stays, the Warnings column says so, and the Report line reads `🔴 Config: apply failed, still running version ...`. Fix the code block and set Config Version again to retry. Only a row with nothing loaded (first activation, or a restart with a broken block) shows the problem as an Error. Messages in Errors and Warnings start with their source in brackets (`[config]`, `[governance]`); a very long list ends with `(N more, see the log)`.
+
+**Upgrading from an earlier Hub setup.** There is no separate status data source or kill switch any more. Delete `status_data_source_id` from `config.toml` (the daemon logs a warning until you do) and set the config row's Status to anything but `Active` to pause the Automator. You can delete the old status data source in Notion. The bot drops `automator_status_page_id` from `config_hub_state.toml` on the next start.
 
 ### 5. Test It
 
