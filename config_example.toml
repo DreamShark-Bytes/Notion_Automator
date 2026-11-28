@@ -15,7 +15,7 @@
 
 # Optional: the Configuration Hub, where behavior is configured in Notion instead of below
 # (README: "Setting up the Configuration Hub"). If config_hub_data_source_id is not set, the daemon reads
-# the [[databases]] / [recurring_tasks] fallback at the bottom of this file.
+# the config_automations.toml file next to this one (see the end of this file).
 #
 # Data source IDs, not database IDs: in the Notion app open the data source, three-dots (top right),
 # More, Developer, Copy data source ID. Share the data source with your integration.
@@ -28,6 +28,11 @@
 # still typing. It sets how long the "edited, not applied" Warning waits, and (without a Config Version column)
 # when an edit is applied. Default 300 (5 minutes).
 # hub_settle_seconds = 300
+
+# How many times in a row the bot recreates its config row after it is deleted (restored from the backup copy
+# config_automations.toml, which the bot writes after each clean apply). After that it stops until a restart, so a
+# loop that keeps deleting the row cannot create pages forever. Default 2.
+# hub_max_recreations = 2
 
 # Optional, for the live check you run by hand (tests/live_sandbox.py, never run automatically): the page that is
 # dedicated to throwaway test data. Put a callout at its top that says so; the script never edits it. Its token,
@@ -48,25 +53,8 @@ day_start_hour = 3
 # Accepts any full day name: "Sunday", "Monday", … "Saturday".
 week_start = "Sunday"
 
-# Statuses that represent a failed or abandoned attempt rather than a true completion.
-# The bot uses this list to decide whether a closed recurring task should trigger
-# creation of the next one (non-completion = retry; completion = advance).
-# Case-insensitive. If absent, falls back to a built-in list covering common
-# variations of "cancelled", "skipped", etc.
-non_completion_statuses = ["Cancelled", "Skipped", "Missed", "Ignored", "Abandoned", "Purchased", "Bought"]
-
-# ---- Fallback: used only when no Hub key above is set ----
-# Database IDs: in the Notion app open the data source, three-dots (top right), More, Developer.
-# Keep non_completion_statuses above (top-level keys must come before any [table]).
-#
-# [[databases]]
-# id                  = "your-task-database-id"
-# closed_date         = true                 # stamps "Closed Date" when a task is completed
-# reopen_count        = true                 # counts reopens in "Reopen Count" (needs closed_date)
-# first_value_fields  = ["Due Date"]         # writes "First Due Date" once
-# update_count_fields = ["Due Date"]         # increments "Due Date Update Count" on each change
-#
-# [recurring_tasks]
-# enabled           = true
-# definitions_db_id = "your-definitions-database-id"
-# tasks_db_id       = "your-task-database-id"
+# Which databases are automated, and the recurring task settings, are NOT set here. They are set in a Configuration
+# Hub config row (config_hub_data_source_id above) or, without a Hub, in a file named config_automations.toml next
+# to this one, written in the same format as a config row: see docs/config_row_example.toml. The old format
+# (the databases and recurring_tasks tables, and non_completion_statuses) is no longer read from this file; the
+# daemon stops with the converted text if it finds it (docs/upgrade_steps.md).

@@ -30,7 +30,7 @@ venv\Scripts\pip install -r requirements.txt
 
 ## 3. Put the token in its own file
 
-Copy `config_secrets_example.toml` to `config_secrets.toml` (same folder) and replace the placeholder with your token. This file is never committed. On Linux restrict it with `chmod 600 config_secrets.toml`; on Windows `install-service.ps1` does it for you when you install the service.
+Copy [`config_secrets_example.toml` (project folder)](../config_secrets_example.toml) to `config_secrets.toml` (same folder) and replace the placeholder with your token. This file is never committed. On Linux restrict it with `chmod 600 config_secrets.toml`; on Windows `install-service.ps1` does it for you when you install the service.
 
 ## 4. Create the config data source in Notion
 
@@ -54,7 +54,7 @@ The data source is where your configuration lives: one row per config, with the 
 
 ## 5. Point the program at it
 
-Copy `config_example.toml` to `config.toml` and set one line:
+Copy [`config_example.toml` (project folder)](../config_example.toml) to `config.toml` and set one line:
 
 ```toml
 config_hub_data_source_id = "paste-the-data-source-id-here"
@@ -73,7 +73,7 @@ The log should show `Hub ready` and then that the Hub created a row named **Auto
 
 ## 7. Write your config
 
-1. Open the **Automator** row. Replace the contents of its code block with your settings. `docs/config_row_example.toml` lists every key with a comment on each; the smallest useful config is:
+1. Open the **Automator** row. Replace the contents of its code block with your settings. [`docs/config_row_example.toml` (docs folder)](config_row_example.toml) lists every key with a comment on each; the smallest useful config is:
 
 ```toml
 [[property_automations]]
@@ -94,9 +94,11 @@ Edit the code block, then tell the program to load it by setting **Config Versio
 
 What the program tells you, in the row:
 
-- **Report**: one line for the app version and when it started, then one each for the last config read and the last governance pass. A yellow line means look at Warnings; a red line means look at Errors.
+- **Report**: one line for the app version and when it started, then one each for config.toml problems (only when there are any), the last config read and the last governance pass. A yellow line means look at Warnings; a red line means look at Errors.
 - **Warnings**: something is wrong but a working config is still running (for example an edit you have not applied, or an apply that failed).
 - **Errors**: the program has no valid config loaded for the row, so nothing from it is running.
+
+If you delete the row by accident, the program creates a new one from its saved copy of your last applied config (`config_automations.toml`) and says so in Warnings, with a link to the old row. See the README, "If the config row is deleted".
 
 To pause everything a row controls, set its Status to anything other than **Active**. Set it back to **Active** to resume. No restart is needed for any of this.
 

@@ -9,7 +9,7 @@ import recurring_tasks
 
 
 def _make_pair(
-    inherited_fields=None,
+    inherit_include_properties=None,
     closed_date_field="Closed Date",
     reopen_count_field="Reopen Count",
     non_completion_statuses=None,
@@ -24,7 +24,7 @@ def _make_pair(
         "closed_date_field":       closed_date_field,
         "reopen_count_field":      reopen_count_field,
         "non_completion_statuses": norm,
-        "inherited_fields":        inherited_fields if inherited_fields is not None else [],
+        "inherit_include_properties":        inherit_include_properties if inherit_include_properties is not None else [],
         "_task_schema":            None,
     }
 
@@ -42,14 +42,14 @@ def _make_task(**props):
 
 def test_copy_task_fields_empty_inherited_inherits_nothing():
     task = _make_task(Priority="High", Effort="Low")
-    pair = _make_pair(inherited_fields=[])
+    pair = _make_pair(inherit_include_properties=[])
     result = recurring_tasks._copy_task_fields(task, pair)
     assert result == {}
 
 
 def test_copy_task_fields_whitelist_copies_listed_only():
     task = _make_task(Priority="High", Effort="Low", Area="Work")
-    pair = _make_pair(inherited_fields=["Priority"])
+    pair = _make_pair(inherit_include_properties=["Priority"])
     result = recurring_tasks._copy_task_fields(task, pair)
     assert "Priority" in result
     assert "Effort" not in result
@@ -58,7 +58,7 @@ def test_copy_task_fields_whitelist_copies_listed_only():
 
 def test_copy_task_fields_whitelist_multiple():
     task = _make_task(Priority="High", Effort="Low", Area="Work")
-    pair = _make_pair(inherited_fields=["Priority", "Area"])
+    pair = _make_pair(inherit_include_properties=["Priority", "Area"])
     result = recurring_tasks._copy_task_fields(task, pair)
     assert "Priority" in result
     assert "Area" in result
@@ -67,7 +67,7 @@ def test_copy_task_fields_whitelist_multiple():
 
 def test_copy_task_fields_excludes_fields_not_inherited():
     task = _make_task(Name="Old Task", Status="Done", Priority="High")
-    pair = _make_pair(inherited_fields=["Name", "Status", "Priority"])
+    pair = _make_pair(inherit_include_properties=["Name", "Status", "Priority"])
     result = recurring_tasks._copy_task_fields(task, pair)
     # Name and Status are in FIELDS_NOT_INHERITED — must always be excluded
     assert "Name" not in result
@@ -79,7 +79,7 @@ def test_copy_task_fields_excludes_fields_not_inherited():
 def test_copy_task_fields_excludes_dynamic_closed_date():
     task = _make_task(**{"My Closed Date": "2026-01-01", "Priority": "High"})
     pair = _make_pair(
-        inherited_fields=["My Closed Date", "Priority"],
+        inherit_include_properties=["My Closed Date", "Priority"],
         closed_date_field="My Closed Date",
     )
     result = recurring_tasks._copy_task_fields(task, pair)
@@ -94,7 +94,7 @@ def test_copy_task_fields_excludes_readonly_types():
             "Formula Field": {"type": "formula", "formula": {"string": "computed"}},
         }
     }
-    pair = _make_pair(inherited_fields=["Priority", "Formula Field"])
+    pair = _make_pair(inherit_include_properties=["Priority", "Formula Field"])
     result = recurring_tasks._copy_task_fields(task, pair)
     assert "Priority" in result
     assert "Formula Field" not in result

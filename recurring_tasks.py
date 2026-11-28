@@ -43,7 +43,8 @@ def page_data_source_id(page: dict) -> str:
 # ------------------------------------------------------------------ #
 
 # Each pair dict: {definitions_data_source_id, tasks_data_source_id, closed_date_field,
-#                  non_completion_statuses (frozenset|None), inherited_fields (list[str]),
+#                  non_completion_statuses (frozenset|None), inherit_include_properties (list[str]|"all"),
+#                  inherit_exclude_properties (list[str]), inherit_icon (bool),
 #                  _task_schema (set[str]|None)}
 _rtd_pairs: list[dict] = []
 _pair_by_tasks_data_source: dict[str, dict] = {}  # normalized tasks_data_source_id -> pair dict
@@ -97,7 +98,9 @@ def configure_pairs(
     Each pair dict must contain:
         definitions_data_source_id (str), tasks_data_source_id (str), closed_date_field (str),
         non_completion_statuses (list[str] — empty uses built-in defaults),
-        inherited_fields (list[str] — empty = inherit nothing).
+        inherit_include_properties (list[str] or "all" — empty list = copy nothing),
+        inherit_exclude_properties (list[str] — only used with "all"),
+        inherit_icon (bool — copy the RTD's icon to each created task; default True).
 
     week_start_day: 0 = Monday (default/ISO), 6 = Sunday.
     day_start_hour: whole hour (0–23) when the logical day begins.
@@ -149,7 +152,9 @@ def configure_pairs(
             "tasks_data_source_id":             t_id,
             "closed_date_field":       p.get("closed_date_field") or "Closed Date",
             "non_completion_statuses": norm_statuses,  # None = use built-in NON_COMPLETION_STATUSES
-            "inherited_fields":        list(p.get("inherited_fields") or []),
+            "inherit_include_properties": "all" if p.get("inherit_include_properties") == "all" else list(p.get("inherit_include_properties") or []),
+            "inherit_exclude_properties": list(p.get("inherit_exclude_properties") or []),
+            "inherit_icon":            p.get("inherit_icon", True) is not False,
             "_task_schema":            None,
         }
         _rtd_pairs.append(pair)
@@ -169,7 +174,6 @@ def init(definitions_data_source_id: str, tasks_data_source_id: str, week_start_
             "tasks_data_source_id":             tasks_data_source_id,
             "closed_date_field":       "Closed Date",
             "non_completion_statuses": [],
-            "inherited_fields":        [],
         }],
         week_start_day=week_start_day,
         day_start_hour=day_start_hour,
@@ -187,10 +191,48 @@ def _load_task_db_schema(client: "NotionClient", pair: dict) -> None:
     try:
         db = client.get_schema(pair["tasks_data_source_id"])
         pair["_task_schema"] = set(db.get("properties", {}).keys())
+        pair["_task_types"] = {name: (p or {}).get("type") for name, p in db.get("properties", {}).items()}
         logger.info(f"Task DB schema loaded for {pair['tasks_data_source_id']}: {len(pair['_task_schema'])} properties.")
     except Exception as e:
         logger.warning(f"Could not load task DB schema for {pair['tasks_data_source_id']}: {e}")
         pair["_task_schema"] = set()
+
+
+def _cannot_copy(label: str, key: str, names: list[str], why: str) -> str:
+    quoted = ", ".join(f"'{n}'" for n in names)
+    return (f"{label}: {key}: {quoted} cannot be copied ({why}), so "
+            f"{'it is' if len(names) == 1 else 'they are'} ignored. Fix: remove {'it' if len(names) == 1 else 'them'} from {key}.")
+
+
+def inherit_warnings() -> list[str]:
+    """Warnings about the copy settings of the active pairs, checked against the loaded task schemas (a pair whose
+    schema is not loaded yet is skipped). Names that cannot be copied are a Warning, not an Error: the setting then
+    simply copies less (least destructive)."""
+    out: list[str] = []
+    for pair in _rtd_pairs:
+        types = pair.get("_task_types")
+        if not types:
+            continue
+        include, exclude = pair.get("inherit_include_properties") or [], pair.get("inherit_exclude_properties") or []
+        label = f"recurring_tasks {pair['definitions_data_source_id']}"
+        fixed = FIELDS_NOT_INHERITED | {pair.get("closed_date_field", "Closed Date"), pair.get("reopen_count_field", "Reopen Count")}
+        for key, names in (("inherit_include_properties", include if include != "all" else []), ("inherit_exclude_properties", exclude)):
+            missing = [n for n in names if n not in types]
+            if missing:
+                quoted = ", ".join(f"'{n}'" for n in missing)
+                subject = f"'{missing[0]}' is not a property" if len(missing) == 1 else f"{quoted} are not properties"
+                hint = ' To copy every property use the string "all" without brackets.' if "all" in missing else ""
+                out.append(f"{label}: {key}: {subject} of the tasks data source, so {'it is' if len(missing) == 1 else 'they are'} ignored.{hint} "
+                           "Fix: correct the name to match a column, or remove it.")
+            if key != "inherit_include_properties":
+                continue
+            managed = [n for n in names if n in types and n in fixed]
+            if managed:
+                out.append(_cannot_copy(label, key, managed, "managed by the bot"))
+            for type_name in dict.fromkeys(types[n] for n in names if n in types and n not in fixed and types[n] in _READONLY_PROP_TYPES):
+                found = [n for n in names if n in types and n not in fixed and types[n] == type_name]
+                out.append(_cannot_copy(label, key, found, f"a {type_name} property, which Notion does not let the bot write"))
+    return out
 
 
 def _filter_optional(props: dict, pair: dict) -> dict:
@@ -602,16 +644,17 @@ def _build_period_target(cadence_type: str | None, cadence_n: float | None, peri
 def _copy_task_fields(closed_task: dict, pair: dict) -> dict:
     """Copy properties from a closed task using the pair's whitelist and dynamic exclusions.
 
-    If pair["inherited_fields"] is empty, returns {} (inherit nothing).
-    Non-empty list: copy only those properties (minus hardcoded and dynamic exclusions).
-    Hardcoded FIELDS_NOT_INHERITED and _READONLY_PROP_TYPES always apply.
+    pair["inherit_include_properties"] is a list of names (empty = copy nothing) or "all". With "all", every property
+    is copied except the names in pair["inherit_exclude_properties"] (the exclude list means nothing for a list).
+    Hardcoded FIELDS_NOT_INHERITED, the closed-date and reopen-count columns and _READONLY_PROP_TYPES always apply.
     """
     closed_date_field  = pair.get("closed_date_field", "Closed Date")
     reopen_count_field = pair.get("reopen_count_field", "Reopen Count")
     dynamic_exclusions = {closed_date_field, reopen_count_field}
     all_exclusions = FIELDS_NOT_INHERITED | dynamic_exclusions
 
-    inherited: list[str] = pair.get("inherited_fields") or []
+    include = pair.get("inherit_include_properties") or []
+    exclude = set(pair.get("inherit_exclude_properties") or []) if include == "all" else set()
 
     props = {}
     for name, prop in closed_task.get("properties", {}).items():
@@ -620,8 +663,8 @@ def _copy_task_fields(closed_task: dict, pair: dict) -> dict:
         prop_type = prop.get("type")
         if not prop_type or prop_type in _READONLY_PROP_TYPES:
             continue
-        if name not in inherited:
-            continue  # whitelist: skip unless explicitly listed
+        if name in exclude or (include != "all" and name not in include):
+            continue  # a list copies only what it names; "all" copies the rest
         if prop_type == "people":
             props[name] = {"people": [{"id": u["id"]} for u in (prop.get("people") or []) if u.get("id")]}
         else:
@@ -1018,7 +1061,7 @@ def _create_next_task(
         logger.error("Cannot create recurring task: no tasks data source ID available.")
         return
 
-    rtd_icon = definition.get("icon")
+    rtd_icon = definition.get("icon") if pair.get("inherit_icon", True) else None
     if rtd_icon and rtd_icon.get("type") == "file":
         rtd_icon = None  # file URLs are not reliably writable via API
 

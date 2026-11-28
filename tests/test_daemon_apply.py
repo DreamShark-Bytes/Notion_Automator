@@ -50,7 +50,7 @@ def _db(ds_id, **kw):
 
 def _pair(defs, tasks):
     return {"definitions_data_source_id": defs, "tasks_data_source_id": tasks, "closed_date_field": "Closed Date",
-            "non_completion_statuses": [], "inherited_fields": []}
+            "non_completion_statuses": [], "inherit_include_properties": []}
 
 
 def _apply(state, databases, pairs, client=None):
@@ -256,12 +256,26 @@ def _run_main(monkeypatch, tmp_path, fake, config_text, after_each_sleep):
         daemon.main()
 
 
-def test_main_starts_from_the_config_toml_fallback_without_the_hub(monkeypatch, tmp_path, clean_state):
+def test_main_starts_from_the_stored_config_file_without_the_hub(monkeypatch, tmp_path, clean_state):
     fake = FakeClient()
-    _run_main(monkeypatch, tmp_path, fake, f'[[databases]]\nid = "{A}"\nclosed_date = true\n', [lambda: None])
-    assert clean_state == [A]                                  # init pass ran once for the fallback data source
+    (tmp_path / "config_automations.toml").write_text(f'[[property_automations]]\ndata_source_id = "{A}"\nclosed_date_property = "Closed Date"\n', encoding="utf-8")
+    monkeypatch.setattr(hub, "STORED_CONFIG_PATH", str(tmp_path / "config_automations.toml"))
+    _run_main(monkeypatch, tmp_path, fake, "poll_interval = 60\n", [lambda: None])
+    assert clean_state == [A]                                  # init pass ran once for the stored config's data source
     assert automations._data_source_configs[A]["closed_date_field"] == "Closed Date"
     assert fake.queries.count(A) >= 1                          # and the first poll queried it
+
+
+def test_main_stops_with_the_converted_text_when_config_toml_has_the_old_format(monkeypatch, tmp_path):
+    with pytest.raises(RuntimeError) as err:
+        _run_main(monkeypatch, tmp_path, FakeClient(), f'[[databases]]\nid = "{A}"\nclosed_date = true\n', [lambda: None])
+    assert "[[property_automations]]" in str(err.value) and f'data_source_id = "{A}"' in str(err.value)
+
+
+def test_main_stops_when_there_is_no_config_at_all(monkeypatch, tmp_path):
+    monkeypatch.setattr(hub, "STORED_CONFIG_PATH", str(tmp_path / "config_automations.toml"))
+    with pytest.raises(RuntimeError, match="No config"):
+        _run_main(monkeypatch, tmp_path, FakeClient(), "poll_interval = 60\n", [lambda: None])
 
 
 def test_main_applies_a_config_version_change_and_a_pause_without_a_restart(monkeypatch, tmp_path, clean_state):

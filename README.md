@@ -95,6 +95,8 @@ venv\Scripts\pip install -r requirements.txt
 
 ### 4. Configure
 
+The three example files are in different folders: [`config_example.toml` (project folder)](config_example.toml) is the template for `config.toml`, [`config_secrets_example.toml` (project folder)](config_secrets_example.toml) is the template for the token file, and [`docs/config_row_example.toml` (docs folder)](docs/config_row_example.toml) is the commented example of a config row.
+
 **Linux:**
 ```bash
 cp config_example.toml config.toml
@@ -107,24 +109,24 @@ copy config_example.toml config.toml
 notepad config.toml
 ```
 
-At minimum, set your integration token (see "Where the token goes" below) and add one `[[databases]]` block for each database you want to automate:
+At minimum, set your integration token (see "Where the token goes" below) and say which databases to automate. That goes in a Configuration Hub config row (below) or, without a Hub, in a file named `config_automations.toml` next to `config.toml`, in the same format as a config row. One block for each data source you want to automate:
 
 ```toml
-[[databases]]
-id = "your-database-id"
+[[property_automations]]
+data_source_id = "your-data-source-id"
 ```
 
-**Where the token goes.** The token lives in `config_secrets.toml`, next to `config.toml`, so the config file holds no secret and can be shared or read freely. Copy `config_secrets_example.toml` to `config_secrets.toml` and replace the placeholder (`token = "ntn_..."`). `config_secrets.toml` is gitignored. Restrict it so only you and the service can read it: on Linux `chmod 600 config_secrets.toml` (the daemon logs a warning if it is group- or world-readable); on Windows `install-service.ps1` runs `icacls` on it for you. The file is plain text on purpose: an unattended daemon has to be able to read it at boot, so an encryption key would have to sit next to it. To keep it elsewhere, start the daemon with `--secrets PATH`. There is no environment variable, because a stale one would silently override the file. At startup the log says where the token came from (`Notion token source: ...`; the value is never logged). If the daemon will not start, check the log: a missing token names the path it looked at, and a malformed file reports the line and column. Do not paste the token into a prompt or a command run through an AI assistant. A `token = "..."` line in `config.toml` still works as a deprecated fallback and logs a warning.
+**Where the token goes.** The token lives in `config_secrets.toml`, next to `config.toml`, so the config file holds no secret and can be shared or read freely. Copy [`config_secrets_example.toml` (project folder)](config_secrets_example.toml) to `config_secrets.toml` and replace the placeholder (`token = "ntn_..."`). `config_secrets.toml` is gitignored. Restrict it so only you and the service can read it: on Linux `chmod 600 config_secrets.toml` (the daemon logs a warning if it is group- or world-readable); on Windows `install-service.ps1` runs `icacls` on it for you. The file is plain text on purpose: an unattended daemon has to be able to read it at boot, so an encryption key would have to sit next to it. To keep it elsewhere, start the daemon with `--secrets PATH`. There is no environment variable, because a stale one would silently override the file. At startup the log says where the token came from (`Notion token source: ...`; the value is never logged). If the daemon will not start, check the log: a missing token names the path it looked at, and a malformed file reports the line and column. Do not paste the token into a prompt or a command run through an AI assistant. A `token = "..."` line in `config.toml` still works as a deprecated fallback and logs a warning.
 
-Enable individual features per database by adding flags to the block. See each feature section below for the exact flags.
+Enable individual features per data source by adding keys to the block. See each feature section below for the exact keys, and `docs/config_reference.md` for every key.
 
 **Notion API version.** The daemon uses Notion API version `2026-03-11` by default. To use a different one, add `notion_version = "2025-09-03"` (or `"2022-06-28"`) to `config.toml`. Version differences are described in Notion's upgrade guides: [2025-09-03](https://developers.notion.com/guides/get-started/upgrade-guide-2025-09-03) (databases become data sources) and [2026-03-11](https://developers.notion.com/guides/get-started/upgrade-guide-2026-03-11) (`archived` becomes `in_trash`). The database IDs in `config.toml` keep working on the new versions as long as the database has a single data source. Requires `Notion_API` v1.4.0 or later (`pip install -r requirements.txt`).
 
 ### Setting up the Configuration Hub (optional)
 
-New install? `docs/initial_setup.md` walks through it in order. A commented example of the code block with every key is in `docs/config_row_example.toml`.
+New install? `docs/initial_setup.md` walks through it in order. A commented example of the code block with every key is in [`docs/config_row_example.toml` (docs folder)](docs/config_row_example.toml).
 
-**Starting without the Hub.** Leave `config_hub_data_source_id` out of `config.toml` and the daemon runs from the settings in `config.toml` alone. Without the Hub there is no Report, Warnings or Errors in Notion: problems go to the log. The Hub is worth setting up once you want those and want to change behavior without editing files or restarting.
+**Starting without the Hub.** Leave `config_hub_data_source_id` out of `config.toml` and write the config in a file named `config_automations.toml` next to it, in the same format as a config row ([`docs/config_row_example.toml` (docs folder)](docs/config_row_example.toml)). Without the Hub there is no Report, Warnings or Errors in Notion: problems go to the log. The Hub is worth setting up once you want those and want to change behavior without editing files or restarting. The old `[[databases]]` and `[recurring_tasks]` entries in `config.toml` are no longer read: the daemon stops and prints the converted text to paste into a config row or `config_automations.toml` (`docs/upgrade_steps.md`).
 
 The Hub lets you change behavior in Notion instead of editing `config.toml`. It is one Notion data source, which you create yourself (the bot never creates it, so it also never needs a parent page):
 
@@ -143,7 +145,7 @@ The Hub lets you change behavior in Notion instead of editing `config.toml`. It 
 | Warnings | Text | Bot-written. Cleared when resolved |
 | Last verified time | Date | Optional. You add it; the bot never creates it. After a governance pass with no failures, the bot sets it on each Active row that read without errors. An old date means the bot has not confirmed that row lately. Must be a Date property: Notion does not let the bot write a "Last edited time" property |
 | Config Version (Datetime) | Date | Optional. You add it, and only you set it: set it to now (by hand, or with an "Apply Config" button) when a changed config should be loaded. See "When the config is applied" below |
-| Report | Text | Optional. Bot-written, one line each for the app (`App: Version X, Started: time`, no emoji because it reports no status), the last config read and the last governance pass; the config and governance lines start with an emoji (🟢 fine, 🟡 see Warnings or an edit is being waited on, 🔴 see Errors, ⚪ paused) and a time to the minute with its zone. Times are shown in the time zone of the Config Version value (so they follow the Notion time zone of whoever last set it; this machine's zone until a Config Version with a zone has been read); this is display only and never affects what counts as a changed config. Plain text for you to read; the bot never reads it back |
+| Report | Text | Optional. Bot-written, one line each for the app (`App: Version X, Started: time`, no emoji because it reports no status), a `config.toml` line when that file had problems, the last config read and the last governance pass; the config and governance lines start with an emoji (🟢 fine, 🟡 see Warnings or an edit is being waited on, 🔴 see Errors, ⚪ paused) and a time to the minute with its zone. Times are shown in the time zone of the Config Version value (so they follow the Notion time zone of whoever last set it; this machine's zone until a Config Version with a zone has been read); this is display only and never affects what counts as a changed config. Plain text for you to read; the bot never reads it back |
 
 The row's page body holds exactly one code block of TOML. The bot never edits it:
 
@@ -156,10 +158,10 @@ reopen_count_property = "Reopen Count"
 update_count_properties = ["Due Date"]
 first_value_properties = ["Due Date", "Status"]
 
-[recurring_tasks]
+[[recurring_tasks]]               # one block per pair; a data source is in one block only
 definitions_data_source_id = "..."
 tasks_data_source_id = "..."
-inherited_properties = ["Priority", "Effort"]
+inherit_include_properties = ["Priority", "Effort"]
 non_completion_statuses = ["Cancelled", "Skipped"]
 ```
 
@@ -181,6 +183,12 @@ The daily governance pass does not re-read the config, but it does compare each 
 **Apply Config button (optional, set up once in the Notion app).** The bot cannot create a button's action through the API, so add it by hand: add a Button property named `Apply Config`, give it the action "Edit property" > `Config Version (Datetime)` > set to "Now". After a change, press it. Leaving `Config Version (Datetime)` empty is allowed: the bot then only reads the row when it is activated or the daemon restarts, and warns that nothing will be applied by an edit.
 
 **A config with a problem never stops a working one.** If an apply finds an error (invalid TOML, a bad ID), the config that was already running stays, the Warnings column says so, and the Report line reads `🔴 Config: apply failed, still running version ...`. Fix the code block and set Config Version again to retry. Only a row with nothing loaded (first activation, or a restart with a broken block) shows the problem as an Error. Messages in Errors and Warnings start with their source in brackets (`[config]`, `[governance]`); a very long list ends with `(N more, see the log)`.
+
+**The stored copy, `config_automations.toml`.** After each apply that had no Errors, the bot writes the row's code block to `config_automations.toml` next to `config.toml`, exactly as you wrote it (comments and spacing included), under a header line that says the bot wrote it. It is used in two cases: the config row is deleted (below), and the Hub cannot be reached at startup after it has worked once (the daemon then runs from the copy and logs a warning). Do not edit it while the Hub is in use: the next apply overwrites it. If a file with that name exists that the bot did not write, the bot leaves it alone, puts a Warning on the row, and keeps no copy until you rename it.
+
+**If the config row is deleted.** A read that does not find the row asks Notion for the saved page. Only if Notion says the page is gone or in the trash does the bot create a new row. If the page still exists elsewhere (moved to another data source) nothing is created and the log says where it is: move it back. The new row is restored from the stored copy and is `Active`, with a note above the code block that links the earlier row, or, if no copy exists (the config was never applied), a blank example row that is not Active. The Warnings column says what happened and links every earlier row of the chain; it clears after 24 hours, or when you set Config Version again. Setting Status to `On hold` stops the automations; deleting the row does not. At most 2 rows are created in a row (`hub_max_recreations` in `config.toml`, counted in `config_hub_state.toml`); the last one writes an Error that automatic recreation then stops until a restart, so a loop that keeps deleting the row cannot create pages forever.
+
+**Problems in `config.toml` itself.** A value the daemon cannot use (for example an unknown `week_start`, or `day_start_hour` that is not a number) falls back to its default and shows in Warnings as `[config.toml] ...`, with a Report line `🟡 config.toml: N warning(s), see Warnings`. A missing token or ID stops the daemon instead, and that is only in the log.
 
 **Upgrading from an earlier Hub setup.** There is no separate status data source or kill switch any more. Delete `status_data_source_id` from `config.toml` (the daemon logs a warning until you do) and set the config row's Status to anything but `Active` to pause the Automator. You can delete the old status data source in Notion. The bot drops `automator_status_page_id` from `config_hub_state.toml` on the next start.
 
@@ -272,9 +280,9 @@ Add a **Date** field named `Closed Date` to your task database.
 ### Config
 
 ```toml
-[[databases]]
-id          = "your-database-id"
-closed_date = true
+[[property_automations]]
+data_source_id       = "your-data-source-id"
+closed_date_property = "Closed Date"
 ```
 
 ---
@@ -294,10 +302,10 @@ Add a **Number** field named `Reopen Count` to your task database.
 ### Config
 
 ```toml
-[[databases]]
-id           = "your-database-id"
-closed_date  = true   # required
-reopen_count = true
+[[property_automations]]
+data_source_id        = "your-data-source-id"
+closed_date_property  = "Closed Date"      # required
+reopen_count_property = "Reopen Count"
 ```
 
 ---
@@ -334,10 +342,10 @@ Add only the columns you want. Missing columns are silently skipped.
 ### Config
 
 ```toml
-[[databases]]
-id                  = "your-database-id"
-first_value_fields  = ["Due Date"]
-update_count_fields = ["Due Date"]
+[[property_automations]]
+data_source_id          = "your-data-source-id"
+first_value_properties  = ["Due Date"]
+update_count_properties = ["Due Date"]
 ```
 
 ---
@@ -382,54 +390,33 @@ Connect your integration to both databases (`...` menu → **Add connections**).
 
 ### Config
 
+In `config.toml` (global settings):
+
 ```toml
-# Global — controls when the logical day begins (affects all period calculations).
+# Controls when the logical day begins (affects all period calculations).
 # Times between midnight and this hour are attributed to the previous calendar day.
 # Also sets when the daily governance cron fires. Default: 3 (3am).
 day_start_hour = 3
 
-# Global — first day of the week. Affects weekly recurring task period boundaries.
+# First day of the week. Affects weekly recurring task period boundaries.
 # Default: "Sunday" (matches Notion). Use "Monday" for ISO/work-week convention.
 week_start = "Sunday"
-
-[[databases]]
-id          = "your-tasks-database-id"
-closed_date = true   # required for recurring task period logic
-
-[recurring_tasks]
-enabled           = true
-definitions_db_id = "your-definitions-database-id"
-tasks_db_id       = "your-tasks-database-id"
 ```
 
-### How it works
+In a config row's code block (or `config_automations.toml`):
 
-- **One open task per series at all times.** When a task is marked Done or Cancelled, the bot creates the next one automatically.
-- **Due dates** are calculated from Anchor Day and Anchor Time. Without an anchor, the due date is a range spanning the full period (e.g. April 1–30 for a monthly task).
-- **Habit Due Dates** — Habit tasks receive a Due Date spanning the full period, making them visible in Notion's Today and This Week calendar views. At each period boundary, governance rolls the open Habit task forward to the new period: the Due Date is updated, Occurrence # resets to 1, and any `First Due Date` / `Due Date Update Count` tracking fields are cleared so the new period starts fresh. Habits are never cancelled or archived for being "overdue" — they simply carry forward.
-- **Minimum N carry-over** — When a `Minimum N per period` task is still open at period end and the minimum was already met, governance carries it forward into the new period (updating Due Date, Period Key, and resetting Occurrence # to 1) instead of archiving it. The opportunity to do more than the minimum is preserved.
-- **Occurrence #** counts how many tasks have been created for the current period. Resets to 1 at each period boundary for all series types. Continues incrementing within a period for `Minimum N per period` and `Unlimited` cadences.
-- **Grace period** (Responsibilities only): if a task is still open more than N days past its due date, the bot cancels it and creates the next one.
-- **Startup governance**: on every daemon start, the bot checks that each Active series has exactly one open task for the current period. Zero → creates one. Multiple → logs a warning for manual resolution.
-- **Live monitoring**: the definitions database is polled alongside your task databases. Creating a new definition or toggling one to `Active` triggers governance within one poll cycle — no restart needed.
-- **Deleted tasks** are handled by governance — if a recurring task is deleted, the startup check detects the missing open task and creates a replacement.
+```toml
+[[property_automations]]
+data_source_id       = "your-tasks-data-source-id"
+closed_date_property = "Closed Date"      # required for recurring task period logic
 
-![Recurring Task Definitions database showing example series including a daily morning routine, weekly physical therapy, and screen time limit, each configured with Type (Habit, Responsibility, or Bad Habit), Cadence Type, Period, and Anchor Time.](assets/TouchedUp_RecurringTaskDefinitions2.png)
-
----
-
-## Adding Your Own Automations
-
-Open `automations.py`. Each automation is a plain Python function:
-
-```python
-def my_automation(client, page, prev_page) -> dict:
-    # page     — the current state of the Notion page
-    # prev_page — the state from the previous poll (or same as page on first sight)
-    # Return a dict of Notion property updates, or {} to skip
-    if some_condition:
-        return {"My Field": {"number": 42}}
-    return {}
+[[recurring_tasks]]
+definitions_data_source_id = "your-definitions-data-source-id"
+tasks_data_source_id       = "your-tasks-data-source-id"
+# What the next task copies from the closed one (default: nothing, and the definition's icon is copied):
+# inherit_include_properties = ["Priority", "Effort"]   # or "all" (a list is required even for one name)
+# inherit_exclude_properties = ["Notes"]                # only with "all"
+# inherit_icon               = true                     # false: tasks are created without the icon
 ```
 
 Then add it to the `AUTOMATIONS` list at the bottom of the file.

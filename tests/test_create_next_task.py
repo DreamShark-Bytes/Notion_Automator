@@ -28,7 +28,7 @@ _TEST_PAIR = {
     "tasks_data_source_id":             "test-tasks-db",
     "closed_date_field":       "Closed Date",
     "non_completion_statuses": None,
-    "inherited_fields":        [],
+    "inherit_include_properties":        [],
     "_task_schema":            None,
 }
 
@@ -42,7 +42,7 @@ def module_state(monkeypatch):
         "tasks_data_source_id":             "test-tasks-db",
         "closed_date_field":       "Closed Date",
         "non_completion_statuses": [],
-        "inherited_fields":        [],
+        "inherit_include_properties":        [],
     }], week_start_day=6, day_start_hour=0)
 
 
@@ -175,3 +175,28 @@ def test_open_task_does_not_count_as_completion():
     )
     # Should not advance: open task covers today, cancelled old task is not a completion
     client.create_page.assert_not_called()
+
+
+# ------------------------------------------------------------------ #
+#  inherit_icon
+# ------------------------------------------------------------------ #
+
+def _create_with_icon(inherit_icon):
+    cancelled = make_task(
+        task_id="old-task", status=CANCELLED_STATUS,
+        due_start=f"{yesterday_str()}T00:00:00+00:00", due_end=f"{yesterday_str()}T23:59:00+00:00",
+        closed_date=f"{yesterday_str()}T23:59:00+00:00",
+    )
+    definition = make_definition("Responsibility", period="Day", cadence_type="Once per period")
+    definition["icon"] = {"type": "emoji", "emoji": "🔥"}
+    client = MagicMock()
+    client.query_database.return_value = [cancelled]
+    client.create_page.return_value = {"id": "new-task-id", "properties": {}}
+    recurring_tasks._create_next_task(client, cancelled, definition, {**_TEST_PAIR, "inherit_icon": inherit_icon})
+    client.create_page.assert_called_once()
+    return client.create_page.call_args[1].get("icon")
+
+
+def test_the_definitions_icon_is_copied_by_default_and_not_when_inherit_icon_is_false():
+    assert _create_with_icon(True) == {"type": "emoji", "emoji": "🔥"}
+    assert _create_with_icon(False) is None

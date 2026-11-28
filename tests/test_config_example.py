@@ -34,9 +34,7 @@ def test_example_with_every_option_uncommented_still_parses():
     assert "automation_hub_page_id" not in cfg  # no longer read
     assert cfg["config_hub_data_source_id"] == "your-config-data-source-id"
     assert "status_data_source_id" not in cfg  # no separate status data source any more
-    assert cfg["non_completion_statuses"] and all(isinstance(x, str) for x in cfg["non_completion_statuses"])
-    assert cfg["databases"][0]["id"] == "your-task-database-id"
-    assert cfg["recurring_tasks"]["enabled"] is True
+    assert "databases" not in cfg and "recurring_tasks" not in cfg and "non_completion_statuses" not in cfg  # not read any more
 
 
 def test_example_contains_only_placeholders():
@@ -55,16 +53,23 @@ def test_every_top_level_key_is_read_by_the_daemon_or_the_live_sandbox_script():
     assert documented - read_keys == set(), f"documented but never read by daemon.py, hub.py or tests/live_sandbox.py: {documented - read_keys}"
 
 
-def test_every_database_flag_is_understood():
-    with open(os.path.join(ROOT, "daemon.py"), encoding="utf-8") as f:
-        src = f.read()
-    flags = set(tomllib.loads(_uncomment(_text()))["databases"][0]) - {"id"}
-    # Flags the config.toml fallback translates itself, or hands to the automations as-is.
-    translated = {"closed_date", "reopen_count"}
-    for flag in flags - translated:
-        assert flag in open(os.path.join(ROOT, "automations.py"), encoding="utf-8").read(), flag
-    for flag in translated:
-        assert f'db.get("{flag}")' in src, flag
+OLD_FORMAT = {
+    "databases": [{"id": "ds-1", "closed_date": True, "reopen_count": True, "first_value_fields": ["Due Date"], "update_count_fields": ["Due Date"]}],
+    "recurring_tasks": {"enabled": True, "definitions_db_id": "ds-2", "tasks_db_id": "ds-1"},
+    "non_completion_statuses": ["Cancelled"],
+}
+
+
+def test_every_old_format_flag_converts_to_a_row_text_the_parser_accepts():
+    import hub
+    text = hub.convert_old_config(OLD_FORMAT)
+    dbs, recurring, problems = hub.parse_row_config(text.replace("ds-1", "1" * 32).replace("ds-2", "2" * 32))
+    assert problems == []
+    assert dbs == [{"data_source_id": "1" * 32, "closed_date_field": "Closed Date", "reopen_count_field": "Reopen Count",
+                    "first_value_fields": ["Due Date"], "update_count_fields": ["Due Date"]}]
+    assert recurring[0]["non_completion_statuses"] == ["Cancelled"] and recurring[0]["definitions_data_source_id"] == "2" * 32
+    assert hub.convert_old_config({"poll_interval": 60}) is None
+    assert "[[recurring_tasks]]" not in hub.convert_old_config({**OLD_FORMAT, "recurring_tasks": {"enabled": False}})
 
 
 def test_secrets_example_parses_and_holds_only_a_placeholder():

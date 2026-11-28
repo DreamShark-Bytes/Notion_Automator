@@ -18,12 +18,15 @@
 # first_value_properties = ["Due Date", "Status"] # each one gets a "First <name>" column
 
 # ---------------------------------------------------------------------------
-# Recurring tasks: the definitions data source (RTDs) and the tasks data source they create tasks in.
-# One [recurring_tasks] table per row; each tasks data source and each definitions data source may
-# appear in only one Active row.
+# Recurring tasks: one [[recurring_tasks]] block per pair of a definitions data source (RTDs) and the
+# tasks data source they create tasks in. Several blocks may be in one row. A data source is in one
+# block only: a definitions data source in one block, a tasks data source in one block, and never one
+# data source as both. Blocks that share a data source are all disabled with an Error.
 # ---------------------------------------------------------------------------
-# [recurring_tasks]
+# [[recurring_tasks]]
 # definitions_data_source_id = "paste-the-data-source-id-here"
 # tasks_data_source_id = "paste-the-data-source-id-here"
-# inherited_properties = ["Priority", "Effort", "Area"]   # copied from the closed task to the next one
+# inherit_include_properties = "all"      # copy every property of the closed task; or a list such as ["Priority", "Effort"] (a list is required even for one name)
+# inherit_exclude_properties = ["Notes"]   # only with "all": properties that are not copied
+# inherit_icon = true                      # copy the recurring task icon to each task it creates (default true)
 # non_completion_statuses = ["Cancelled", "Skipped"]      # empty or missing = the built-in defaults

@@ -31,11 +31,19 @@ def _code(toml_text):
     return {"type": "code", "code": {"language": "toml", "rich_text": [{"plain_text": toml_text}]}}
 
 
+class NotFound(Exception):
+    """What the Notion client raises for a 404: an HTTP error that carries the response."""
+    def __init__(self):
+        super().__init__("404 Not Found")
+        self.response = type("R", (), {"status_code": 404, "json": lambda self: {"message": "Could not find page"}})()
+
+
 class FakeClient:
     def __init__(self, rows=None, bodies=None, schemas=None):
         self.rows = rows or {}          # data source id -> [row]
         self.bodies = bodies or {}      # row id -> [block]
         self.schemas = schemas or {}    # data source id -> {"properties": {...}}
+        self.pages = {}                 # page id -> page object (or an exception to raise) for get_page; others are 404
         self.updates, self.created, self.appended = [], [], []
         self.fail_query = False
         self.fail_blocks = False
@@ -69,6 +77,13 @@ class FakeClient:
         self.appended.append((block_id, children))
         return {}
 
+    def get_page(self, page_id):
+        if page_id not in self.pages:
+            raise NotFound()
+        if isinstance(self.pages[page_id], Exception):
+            raise self.pages[page_id]
+        return self.pages[page_id]
+
     def get_schema(self, any_id):
         if any_id not in self.schemas:
             raise RuntimeError("not found")
@@ -100,10 +115,10 @@ update_count_properties = ["Due Date"]
 first_value_properties = ["Due Date", "Status"]
 '''
 RECURRING = f'''
-[recurring_tasks]
+[[recurring_tasks]]
 definitions_data_source_id = "{DEFS}"
 tasks_data_source_id = "{TASKS}"
-inherited_properties = ["Priority"]
+inherit_include_properties = ["Priority"]
 non_completion_statuses = ["Cancelled"]
 '''
 
@@ -116,7 +131,7 @@ def test_property_automation_maps_to_daemon_shape():
         "data_source_id": TASKS, "closed_date_field": "Done On", "reopen_count_field": "Reopen Count",
         "first_value_fields": ["Due Date", "Status"], "update_count_fields": ["Due Date"],
     }]
-    assert rtd is None and problems == []
+    assert rtd == [] and problems == []
 
 
 def test_dashes_in_ids_are_removed():
@@ -165,29 +180,29 @@ def test_unknown_keys_warn():
 
 def test_invalid_toml_reports_line_and_column_without_the_text():
     dbs, rtd, problems = hub.parse_row_config('[[property_automations]]\ndata_source_id = SECRETISH\n')
-    assert dbs == [] and rtd is None
+    assert dbs == [] and rtd == []
     assert problems[0][0] == "error" and "line 2" in problems[0][1] and "SECRETISH" not in problems[0][1]
 
 
 def test_recurring_tasks_maps_to_daemon_shape():
     _, rtd, problems = hub.parse_row_config(RECURRING)
-    assert rtd == {"definitions_data_source_id": DEFS, "tasks_data_source_id": TASKS,
-                   "inherited_fields": ["Priority"], "non_completion_statuses": ["Cancelled"]} and problems == []
+    assert rtd == [{"definitions_data_source_id": DEFS, "tasks_data_source_id": TASKS,
+                    "inherit_include_properties": ["Priority"], "inherit_exclude_properties": [], "inherit_icon": True, "non_completion_statuses": ["Cancelled"]}] and problems == []
 
 
 def test_recurring_tasks_with_a_missing_id_is_skipped_with_an_error():
-    _, rtd, problems = hub.parse_row_config(f'[recurring_tasks]\ndefinitions_data_source_id = "{DEFS}"\n')
-    assert rtd is None and problems[0][0] == "error" and "tasks_data_source_id" in problems[0][1]
+    _, rtd, problems = hub.parse_row_config(f'[[recurring_tasks]]\ndefinitions_data_source_id = "{DEFS}"\n')
+    assert rtd == [] and problems[0][0] == "error" and "tasks_data_source_id" in problems[0][1]
 
 
 def test_a_row_may_hold_both_sections():
     dbs, rtd, problems = hub.parse_row_config(TASKS_BLOCK + RECURRING)
-    assert len(dbs) == 1 and rtd is not None and problems == []
+    assert len(dbs) == 1 and len(rtd) == 1 and problems == []
 
 
 def test_example_row_toml_is_inert_and_fits_one_rich_text():
     dbs, rtd, problems = hub.parse_row_config(hub._EXAMPLE_TOML)
-    assert dbs == [] and rtd is None
+    assert dbs == [] and rtd == []
     assert [sev for sev, _ in problems] == ["warning"] and "nothing is configured" in problems[0][1]
     assert len(hub._EXAMPLE_TOML) < 2000 and len(hub._EXAMPLE_ROW_INTRO) < 2000
 
@@ -196,7 +211,7 @@ def test_example_row_toml_is_valid_when_every_option_is_switched_on():
     live = "\n".join(re.sub(r"^# (?=\[|\w+ =)", "", line) for line in hub._EXAMPLE_TOML.splitlines())
     live = live.replace("paste-the-data-source-id-here", TASKS)
     dbs, rtd, problems = hub.parse_row_config(live)
-    assert len(dbs) == 1 and rtd is not None and problems == []
+    assert len(dbs) == 1 and len(rtd) == 1 and problems == []
 
 
 # ---- read_config -----------------------------------------------------------------
@@ -213,7 +228,7 @@ def test_active_row_builds_the_daemon_config(ready):
     assert [d["data_source_id"] for d in cfg["databases"]] == [TASKS]
     assert cfg["rtd_pairs"] == [{
         "definitions_data_source_id": DEFS, "tasks_data_source_id": TASKS, "closed_date_field": "Done On",
-        "non_completion_statuses": ["Cancelled"], "inherited_fields": ["Priority"],
+        "non_completion_statuses": ["Cancelled"], "inherit_include_properties": ["Priority"], "inherit_exclude_properties": [], "inherit_icon": True,
     }]
     assert client.updates == []  # nothing to report, nothing written
 
@@ -249,14 +264,14 @@ def test_active_row_with_two_code_blocks_is_an_error_and_applies_nothing(ready):
     assert hub.read_config(client) == {"databases": [], "rtd_pairs": []}
     hub.flush(client)
     props = client.updates[0][1]
-    assert "2 code blocks" in props["Errors"]["rich_text"][0]["text"]["content"]
+    assert "2 code blocks" in "".join(s["text"]["content"] for s in props["Errors"]["rich_text"])
 
 
 def test_active_row_without_a_code_block_is_an_error(ready):
     client = _client_with((_row("r1"), []))
     hub.read_config(client)
     hub.flush(client)
-    assert "No code block" in client.updates[0][1]["Errors"]["rich_text"][0]["text"]["content"]
+    assert "No code block" in "".join(s["text"]["content"] for s in client.updates[0][1]["Errors"]["rich_text"])
 
 
 def test_messages_are_written_once_and_cleared_when_resolved(ready):
@@ -264,8 +279,8 @@ def test_messages_are_written_once_and_cleared_when_resolved(ready):
     client = _client_with((_row("r1"), bad))
     hub.read_config(client)
     hub.flush(client)
-    written = client.updates[0][1]["Errors"]["rich_text"][0]["text"]["content"]
-    assert written.startswith("[config] ")
+    written = "".join(s["text"]["content"] for s in client.updates[0][1]["Errors"]["rich_text"])
+    assert written.startswith("1. [config] ")
 
     # Same problem next time: the row already shows it, so nothing is written (a write changes last_edited_time).
     client2 = _client_with((_row("r1", errors=written), bad))
@@ -287,7 +302,7 @@ def test_duplicate_active_tasks_data_source_disables_both_pairs(ready, caplog):
         cfg = hub.read_config(client)
     hub.flush(client)
     assert cfg["rtd_pairs"] == []
-    assert "both reference the same tasks data source" in caplog.text
+    assert "reference the same tasks data source" in caplog.text
     assert any(page == "r2" and "Errors" in props for page, props in client.updates)
 
 
@@ -595,4 +610,4 @@ def test_docs_example_file_is_valid_and_mentions_every_accepted_key():
     live = "\n".join(re.sub(r"^# (?=\[|\w+ =)", "", line) for line in text.splitlines())
     live = live.replace("paste-the-data-source-id-here", TASKS)
     dbs, rtd, problems = hub.parse_row_config(live)
-    assert len(dbs) == 1 and rtd is not None and problems == []
+    assert len(dbs) == 1 and len(rtd) == 1 and problems == []

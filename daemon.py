@@ -142,10 +142,11 @@ def run_governance(client: NotionClient, trigger: str = "daemon") -> list[dict]:
             if result:
                 created_pages.extend(result)
         except Exception as e:
-            failures.append(f"{fn.__name__} failed: {e}")
+            failures.append(f"{fn.__name__} failed: {e}. Fix: see the log for the cause; the pass is tried again at the next governance run.")
             logger.error(f"GOVERNANCE function '{fn.__name__}' failed: {e}")
     flush_bot_notes(client)
     clear_bot_notes()
+    hub.report("inheritance", warnings=recurring_tasks.inherit_warnings())
     if trigger.startswith("daily"):
         hub.check_unapplied(client)  # safety net; a startup or apply pass has just read the rows
     hub.record_governance(failures, trigger)
@@ -214,6 +215,16 @@ def run_automations_init_pass(client: NotionClient, data_source_id: str) -> dict
     return snapshot
 
 
+def _with_updates(page: dict, updates: dict) -> dict:
+    """A copy of `page` with property writes applied, so a later automation sees what an earlier one is about to
+    write (for example First Closed Date copies the Closed Date that was stamped in the same pass)."""
+    properties = dict(page.get("properties", {}))
+    for name, value in updates.items():
+        old = properties.get(name) or {}
+        properties[name] = {"type": old.get("type") or next(iter(value)), **value}
+    return {**page, "properties": properties}
+
+
 def run_automations_on_page(
     client: NotionClient, page: dict, prev_page: dict | None
 ) -> tuple[dict | None, list[dict]]:
@@ -237,13 +248,18 @@ def run_automations_on_page(
     updates = {}
     created_pages: list[dict] = []
 
+    current, previous = page, prev_page
     for fn in AUTOMATIONS:
         try:
-            result = fn(client, page, prev_page)
+            result = fn(client, current, previous)
             # Strip the bot-created-pages sentinel key before building field updates.
             new_pages = result.pop(BOT_CREATED_PAGES_KEY, [])
             created_pages.extend(new_pages)
             updates.update(result)
+            if result:
+                current = _with_updates(current, result)
+                if prev_page is page:
+                    previous = current   # the init pass compares a page with itself; keep it that way
         except Exception as e:
             logger.error(f"Automation '{fn.__name__}' failed on page {page['id']}: {e}")
 
@@ -476,6 +492,105 @@ def poll_rtd_definitions(client: NotionClient, state: RuntimeState) -> bool:
     return activated
 
 
+class _CollectProblems(logging.Handler):
+    """Collects the warnings and errors logged while config.toml's own values are read, so they can also be shown on
+    the Automator's config row."""
+
+    def __init__(self):
+        super().__init__(level=logging.WARNING)
+        self.problems: list[tuple[str, str]] = []
+
+    def emit(self, record):
+        self.problems.append(("error" if record.levelno >= logging.ERROR else "warning", record.getMessage()))
+
+
+def _read_settings(cfg: dict) -> tuple[dict, list[tuple[str, str]]]:
+    """The values of config.toml's own keys with their defaults, and the problems found while reading them (a value
+    that fell back to its default, a key that is no longer used). Used at startup and again whenever the file is saved,
+    so a fixed problem disappears from the config row without a restart."""
+    collector = _CollectProblems()
+    logging.getLogger().addHandler(collector)   # warnings from reading config.toml values go to the config row too
+    try:
+        poll_interval = cfg.get("poll_interval", 60)
+
+        _dsh_aliases = {"governance_hour", "day_start", "daystart_hour", "start_hour"}
+        for _alias in _dsh_aliases:
+            if _alias in cfg:
+                logger.warning(
+                    f"{_alias}: key is not recognized and its value is ignored. Fix: rename it to day_start_hour."
+                )
+        _raw_dsh = cfg.get("day_start_hour")
+        if _raw_dsh is None:
+            logger.info("day_start_hour not set in config.toml — using default 3 (3am).")
+            day_start_hour = 3
+        else:
+            try:
+                _dsh_float = float(_raw_dsh)
+            except (TypeError, ValueError):
+                logger.warning(f"day_start_hour: value '{_raw_dsh}' is not a valid number, so 3 is used. Fix: write a whole number from 0 to 23.")
+                day_start_hour = 3
+            else:
+                day_start_hour = int(_dsh_float)
+                if day_start_hour != _dsh_float:
+                    logger.warning(
+                        f"day_start_hour {_raw_dsh} is not a whole number — truncated to {day_start_hour}."
+                    )
+                if not 0 <= day_start_hour <= 23:
+                    logger.warning(f"day_start_hour: {day_start_hour} is out of range, so 3 is used. Fix: write a whole number from 0 to 23.")
+                    day_start_hour = 3
+
+        _WEEK_DAY_MAP = {
+            "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+            "friday": 4, "saturday": 5, "sunday": 6,
+        }
+        week_start_str = str(cfg.get("week_start", "Sunday")).lower()
+        week_start_day = _WEEK_DAY_MAP.get(week_start_str, 6)
+        if week_start_str not in _WEEK_DAY_MAP:
+            logger.warning(f"week_start: '{cfg.get('week_start')}' is unknown, so Sunday is used. Fix: write a weekday name such as \"Monday\".")
+
+        config_ds_id = cfg.get("config_hub_data_source_id")
+        if cfg.get("automation_hub_page_id"):
+            logger.warning(
+                "automation_hub_page_id: no longer used. Fix: remove it and set config_hub_data_source_id "
+                "(README: \"Setting up the Configuration Hub\")."
+            )
+        if cfg.get("status_data_source_id"):
+            logger.warning(
+                "status_data_source_id: no longer used, because there is no separate status data source or kill switch any more. "
+                "Fix: remove the key from config.toml; to pause a config row set its Status to anything but Active."
+            )
+        settle_seconds = hub.resolve_settle_seconds(cfg.get("hub_settle_seconds"))
+        max_recreations = hub.resolve_max_recreations(cfg.get("hub_max_recreations"))
+        notion_version = hub.resolve_notion_version(cfg.get("notion_version"))
+    finally:
+        logging.getLogger().removeHandler(collector)
+    return {
+        "poll_interval": poll_interval, "day_start_hour": day_start_hour, "week_start_day": week_start_day,
+        "config_ds_id": config_ds_id, "settle_seconds": settle_seconds, "max_recreations": max_recreations,
+        "notion_version": notion_version,
+    }, collector.problems
+
+
+def _refresh_config_toml(client: NotionClient, path: str, seen: tuple | None) -> tuple | None:
+    """If config.toml was saved since the last look, read it again and show its problems on the config row (an empty
+    list clears them). Only the shown problems follow the file: the values themselves are still read at startup."""
+    try:
+        info = os.stat(path)
+    except OSError:
+        return seen
+    stamp = (info.st_mtime_ns, info.st_size)
+    if stamp == seen:
+        return seen
+    try:
+        with open(path, "rb") as f:
+            problems = _read_settings(tomllib.load(f))[1]
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        problems = [("error", f"config.toml could not be read: {e}")]
+    hub.report_config_toml(problems)
+    hub.flush(client)
+    return stamp
+
+
 def main():
     args = parser.parse_args()
     _configure_logging(args.debug)
@@ -491,56 +606,18 @@ def main():
                    if os.path.exists(old_path) and not os.path.exists(secrets_path) else "")
         raise RuntimeError(f'No Notion token: put token = "..." in {secrets_path} (see config_secrets_example.toml).{renamed}')
 
-    poll_interval = cfg.get("poll_interval", 60)
-
-    _dsh_aliases = {"governance_hour", "day_start", "daystart_hour", "start_hour"}
-    for _alias in _dsh_aliases:
-        if _alias in cfg:
-            logger.warning(
-                f"Config key '{_alias}' is not recognized — did you mean 'day_start_hour'? Value ignored."
-            )
-    _raw_dsh = cfg.get("day_start_hour")
-    if _raw_dsh is None:
-        logger.info("day_start_hour not set in config.toml — using default 3 (3am).")
-        day_start_hour = 3
-    else:
-        try:
-            _dsh_float = float(_raw_dsh)
-        except (TypeError, ValueError):
-            logger.warning(f"day_start_hour value '{_raw_dsh}' is not a valid number — defaulting to 3.")
-            day_start_hour = 3
-        else:
-            day_start_hour = int(_dsh_float)
-            if day_start_hour != _dsh_float:
-                logger.warning(
-                    f"day_start_hour {_raw_dsh} is not a whole number — truncated to {day_start_hour}."
-                )
-            if not 0 <= day_start_hour <= 23:
-                logger.warning(f"day_start_hour {day_start_hour} is out of range (0–23) — defaulting to 3.")
-                day_start_hour = 3
-
-    _WEEK_DAY_MAP = {
-        "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
-        "friday": 4, "saturday": 5, "sunday": 6,
-    }
-    week_start_str = str(cfg.get("week_start", "Sunday")).lower()
-    week_start_day = _WEEK_DAY_MAP.get(week_start_str, 6)
-    if week_start_str not in _WEEK_DAY_MAP:
-        logger.warning(f"Unknown week_start '{cfg.get('week_start')}' — defaulting to Sunday.")
-
-    config_ds_id = cfg.get("config_hub_data_source_id")
-    if cfg.get("automation_hub_page_id"):
-        logger.warning(
-            "automation_hub_page_id in config.toml is no longer used. Set config_hub_data_source_id; "
-            "README: \"Setting up the Configuration Hub\"."
+    old_format = hub.convert_old_config(cfg)
+    if old_format:
+        raise RuntimeError(
+            "config.toml still has [[databases]] / [recurring_tasks], which are no longer read. Put this in a Configuration Hub "
+            "config row's code block, or save it as config_automations.toml next to config.toml, then remove those blocks "
+            f"(and non_completion_statuses) from config.toml (docs/upgrade_steps.md):\n{old_format}"
         )
-    if cfg.get("status_data_source_id"):
-        logger.warning(
-            "status_data_source_id in config.toml is no longer used: there is no separate status data source or "
-            "kill switch any more. Set a config row's Status to anything but Active to pause it. "
-            "Remove the key from config.toml."
-        )
-    settle_seconds = hub.resolve_settle_seconds(cfg.get("hub_settle_seconds"))
+
+    settings, config_problems = _read_settings(cfg)
+    poll_interval, day_start_hour, week_start_day = settings["poll_interval"], settings["day_start_hour"], settings["week_start_day"]
+    config_ds_id, settle_seconds, max_recreations = settings["config_ds_id"], settings["settle_seconds"], settings["max_recreations"]
+    notion_version = settings["notion_version"]
 
     api_version = getattr(_notion_api, "__version__", None)
     if api_version is None:
@@ -555,78 +632,46 @@ def main():
                 f" — run: pip install -r requirements.txt"
             )
 
-    notion_version = hub.resolve_notion_version(cfg.get("notion_version"))
     logger.info(f"Notion API version: {notion_version}")
     client = NotionClient(token, debug=args.debug, notion_version=notion_version)
 
     if config_ds_id:
-        hub.init(client, config_ds_id, daemon_version=VERSION, settle_seconds=settle_seconds)
+        hub.init(client, config_ds_id, daemon_version=VERSION, settle_seconds=settle_seconds, max_recreations=max_recreations)
+        hub.report_config_toml(config_problems)
     else:
         logger.info("config_hub_data_source_id not set in config.toml — Hub features disabled.")
 
     # ---- Database and RTD config loading --------------------------------
-    # Hub takes precedence when available. config.toml [[databases]] / [recurring_tasks]
-    # are the fallback when Hub is not configured or unavailable at startup.
+    # The Hub wins when it can be read. Otherwise the stored config file (config_automations.toml) is the fallback:
+    # the user's own file when no Hub is configured, or the bot's copy when a Hub that worked before is unreachable.
 
+    hub_cfg = None
     if hub.is_available():
         hub.validate_hub_schema(client)
         hub_cfg = hub.read_config(client)
-    else:
-        hub_cfg = None
-
-    if hub_cfg is not None:
-        databases = hub_cfg["databases"]
-        rtd_pairs = hub_cfg["rtd_pairs"]
-        if not databases:
-            logger.warning("Hub: no Active property_automations in the config rows — monitoring zero task databases.")
-        if not rtd_pairs:
-            logger.warning("Hub: no Active recurring_tasks table in the config rows — recurring task governance disabled.")
-        logger.info(
-            f"Config source: Configuration Hub "
-            f"({len(databases)} database(s), {len(rtd_pairs)} RTD pair(s))"
-        )
-    else:
-        # config.toml fallback
-        _toml_dbs = cfg.get("databases", [])
-        if not _toml_dbs:
-            if config_ds_id:
-                raise RuntimeError(
-                    "The Configuration Hub is configured (config_hub_data_source_id) but its config could not be read; "
-                    "see the 'Hub:' errors and warnings above for the reason. config.toml has no [[databases]] fallback."
-                )
+    from_hub = hub_cfg is not None
+    if not from_hub:
+        hub_cfg = hub.load_stored_config(bool(config_ds_id))
+    if hub_cfg is None:
+        if config_ds_id:
             raise RuntimeError(
-                "No [[databases]] entries found in config.toml and config_hub_data_source_id is not set."
+                "The Configuration Hub is configured (config_hub_data_source_id) but its config could not be read, and there is "
+                f"no usable stored copy ({hub.STORED_CONFIG_PATH}); see the 'Hub:' errors and warnings above for the reason."
             )
-        databases = []
-        for db in _toml_dbs:
-            entry = {k: v for k, v in db.items() if k != "id"}
-            entry["data_source_id"] = db["id"]
-            if db.get("closed_date"):
-                entry["closed_date_field"] = "Closed Date"
-            if db.get("reopen_count"):
-                entry["reopen_count_field"] = "Reopen Count"
-            databases.append(entry)
-
-        rtd_pairs = []
-        rt_cfg = cfg.get("recurring_tasks", {})
-        if rt_cfg.get("enabled"):
-            _rt_defs_id = rt_cfg.get("definitions_db_id")
-            _rt_tasks_id = rt_cfg.get("tasks_db_id")
-            _non_comp = cfg.get("non_completion_statuses") or []
-            if _rt_defs_id and _rt_tasks_id:
-                rtd_pairs = [{
-                    "definitions_data_source_id": _rt_defs_id,
-                    "tasks_data_source_id":       _rt_tasks_id,
-                    "closed_date_field":          "Closed Date",
-                    "non_completion_statuses":    _non_comp,
-                    "inherited_fields":           [],
-                }]
-            else:
-                logger.warning("recurring_tasks enabled but definitions_db_id or tasks_db_id is missing — skipping.")
-        src = "Hub not available" if config_ds_id else "Hub not configured"
-        logger.info(
-            f"Config source: config.toml ({len(databases)} database(s)) [{src}]"
+        raise RuntimeError(
+            f"No config: set config_hub_data_source_id in config.toml, or write {hub.STORED_CONFIG_PATH} next to it "
+            "(same format as a config row, see docs/config_row_example.toml)."
         )
+    databases = hub_cfg["databases"]
+    rtd_pairs = hub_cfg["rtd_pairs"]
+    if not databases:
+        logger.warning("No Active property_automations in the config — monitoring zero task databases.")
+    if not rtd_pairs:
+        logger.warning("No Active recurring_tasks table in the config — recurring task governance disabled.")
+    logger.info(
+        f"Config source: {'Configuration Hub' if from_hub else hub.STORED_CONFIG_PATH} "
+        f"({len(databases)} database(s), {len(rtd_pairs)} RTD pair(s))"
+    )
 
     # ---- Hub snapshot -------------------------------------------------
     hub_snapshot: dict[str, dict] = {}
@@ -679,7 +724,15 @@ def main():
     logger.info(f"  Automations : {[fn.__name__ for fn in AUTOMATIONS]}")
     logger.info(f"  Governance  : {[fn.__name__ for fn in GOVERNANCE]}")
 
+    config_toml_seen = None
+    if os.path.exists(args.config):
+        info = os.stat(args.config)
+        config_toml_seen = (info.st_mtime_ns, info.st_size)
+
     while True:
+        # config.toml saved since the last look? Its problems on the config row follow the file, with no restart.
+        if hub.is_available():
+            config_toml_seen = _refresh_config_toml(client, args.config, config_toml_seen)
         # Hub: has the config changed? Runs every cycle before anything else.
         if hub.is_available():
             try:

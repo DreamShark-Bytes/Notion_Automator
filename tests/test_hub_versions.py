@@ -30,7 +30,7 @@ def _written(client, row_id="r1"):
         if page_id == row_id:
             for column, value in props.items():
                 parts = value["rich_text"]
-                out[column] = parts[0]["text"]["content"] if parts else ""
+                out[column] = "".join(part["text"]["content"] for part in parts)
     return out
 
 
@@ -272,14 +272,14 @@ def test_flush_prefixes_each_message_with_its_source_and_writes_once(ready):
     hub.report("config", warnings=["careful"], row="r1")
     client = FakeClient(rows={CFG: [_row("r1")]})
     hub.flush(client)
-    assert _written(client) == {"Errors": "[governance] x failed", "Warnings": "[config] careful"}
+    assert _written(client) == {"Errors": "1. [governance] x failed", "Warnings": "1. [config] careful"}
     hub.flush(client)  # nothing changed since the last flush
     assert len(client.updates) == 1
 
 
 def test_flush_does_not_rewrite_text_the_row_already_shows(ready):
     hub.report("governance", errors=["x failed"], row="r1")
-    client = FakeClient(rows={CFG: [_row("r1", errors="[governance] x failed")]})
+    client = FakeClient(rows={CFG: [_row("r1", errors="1. [governance] x failed")]})
     hub.flush(client)
     assert client.updates == []
 
@@ -294,11 +294,11 @@ def test_a_failed_flush_is_retried(ready):
 
 def test_long_messages_end_with_a_visible_marker():
     messages = [f"message number {i} " + "x" * 200 for i in range(20)]
-    text = hub._message_text(messages)
+    text, _ = hub._message_column([("config", m) for m in messages], "red")
     assert len(text) <= 1900 and text.endswith("more, see the log)")
-    assert text.startswith("message number 0 ")
-    assert hub._message_text(["short"]) == "short"
-    assert hub._message_text(["y" * 5000]).endswith("…")
+    assert text.startswith("1. [config] message number 0 ")
+    assert hub._message_column([("config", "short")], "red")[0] == "1. [config] short"
+    assert hub._message_column([("config", "y" * 5000)], "red")[0].endswith("…")
 
 
 def test_report_lines_are_written_in_order_when_the_column_exists(ready):

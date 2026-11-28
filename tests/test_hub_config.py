@@ -55,7 +55,7 @@ def _make_pair(tasks_id: str, defs_id: str) -> dict:
         "tasks_data_source_id":       tasks_id,
         "closed_date_field": "Closed Date",
         "non_completion_statuses": [],
-        "inherited_fields":  [],
+        "inherit_include_properties":  [],
     }
 
 

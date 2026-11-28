@@ -414,7 +414,6 @@ AUTOMATIONS = [
     # auto_recurring_tasks must remain last — it creates Notion pages and should
     # run after all field-stamping automations have settled their updates.
     auto_recurring_tasks,
-    page_data_source_id,
     # auto_last_edited_note,   # <- uncomment to enable
 ]
 

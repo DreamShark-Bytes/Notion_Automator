@@ -21,7 +21,7 @@ _DUMMY_PAIR = {
     "tasks_data_source_id":             "a" * 32,
     "closed_date_field":       "Closed Date",
     "non_completion_statuses": None,
-    "inherited_fields":        [],
+    "inherit_include_properties":        [],
     "_task_schema":            None,
 }
 

@@ -125,6 +125,10 @@ class FakeNotion:
         self.trashed.add(page_id)
         self.touched.append(page_id)
 
+    def get_page(self, page_id):
+        page_id = page_id.replace("-", "")
+        return {**self._page(page_id), "in_trash": page_id in self.trashed}
+
     # blocks
     def append_blocks(self, block_id, children):
         block_id = block_id.replace("-", "")
@@ -182,6 +186,7 @@ def test_cleanup_trashes_only_what_was_created_and_keeps_going_after_a_failure()
 
 def test_a_full_run_passes_and_leaves_the_sandbox_page_as_it_found_it(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(hub, "HUB_CONFIG_PATH", str(tmp_path / "real_state_file.toml"))
+    monkeypatch.setattr(hub, "STORED_CONFIG_PATH", str(tmp_path / "real_stored_config.toml"))
     notion = FakeNotion()
     failed = sb.run(notion, PAGE)
     out = capsys.readouterr().out
@@ -194,7 +199,8 @@ def test_a_full_run_passes_and_leaves_the_sandbox_page_as_it_found_it(tmp_path, 
     assert "c0ffee" not in notion.touched
     # The real hub state file path was restored, and the run never wrote to it.
     assert hub.HUB_CONFIG_PATH == str(tmp_path / "real_state_file.toml")
-    assert not (tmp_path / "real_state_file.toml").exists()
+    assert not (tmp_path / "real_state_file.toml").exists() and not (tmp_path / "real_stored_config.toml").exists()
+    assert hub.STORED_CONFIG_PATH == str(tmp_path / "real_stored_config.toml")
 
 
 def test_a_run_warns_when_the_callout_is_missing(tmp_path, monkeypatch, capsys):

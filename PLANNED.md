@@ -246,7 +246,7 @@ Hardcoded invariants (`FIELDS_NOT_INHERITED`, `_READONLY_PROP_TYPES`) remain in 
 - **Sequencing:** Slice 3 (Status writes) is unaffected. Slices 4-6 (error writes, change detection, Force Governance) depend on the config-row format, so settle it before them. Change detection should use each row's `last_edited_time`; editing a page's body updates its `last_edited_time` (user-confirmed 2026-11-14), so body edits can drive change detection.
 - **Open questions:** (a) RESOLVED 2026-11-14: pages can be moved between data sources with `POST /v1/pages/{page_id}/move` and a `data_source_id` parent (path found in Notion's downloaded OpenAPI spec; the docs page says it needs Notion-Version 2026-03-11 and that `database_id` is not a valid parent for this call). Pages cannot move between "databases" as such, because a database is a container of data sources and views; (b) RESOLVED 2026-11-14: `toml` IS a valid code-block language. It is one of the 90 members of the `languageRequest` enum in Notion's OpenAPI spec (downloaded from developers.notion.com/openapi.json and searched locally), and the user confirmed it in the Notion app. An earlier entry here said it was not supported; that came from a stale docs page read through a summarizing fetch and was wrong. The bot creates the code block with language `toml`, and the reader should still accept any language tag; (b2) how the Automator ignores other tools' rows if they are not TOML (for example a Shortcut row written as JSON): undecided and not blocking, since no such rows exist yet; (c) daemon page-body reads cost one extra API call per row, so read bodies only for rows whose `last_edited_time` changed.
 
-#### Config row, Report and Config Version (design agreed 2026-11-25; build steps 0-4 implemented 2026-11-25, uncommitted, manual tests pending; steps 5-8 not yet built)
+#### Config row, Report and Config Version (design agreed 2026-11-25; build steps 0-8 implemented 2026-11-25, unit-tested; live check of steps 5-7 pending, see STATUS.md)
 
 Supersedes the separate status data source. Where this conflicts with the bullets above, this subsection wins. Settled in conversation 2026-11-25; items marked **to confirm** have a recommended default but no explicit user answer.
 
@@ -359,9 +359,9 @@ data_source_id = "0123456789abcdef0123456789abcdef"
 closed_date_property = "Purchase Date"
 ```
 
-**Section 2: recurring tasks** (replaces "RTD Config" rows):
+**Section 2: recurring tasks** (replaces "RTD Config" rows; one `[[recurring_tasks]]` block per pair, user decision 2026-11-27; a data source is in one block only, as definitions or tasks, never both):
 ```toml
-[recurring_tasks]
+[[recurring_tasks]]
 definitions_data_source_id = "0123456789abcdef0123456789abcdef"
 tasks_data_source_id = "0123456789abcdef0123456789abcdef"
 inherited_properties = ["Priority", "Effort", "Area"]

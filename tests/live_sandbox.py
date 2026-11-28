@@ -16,6 +16,7 @@ import logging
 import os
 import sys
 import tempfile
+import time
 import tomllib
 from datetime import datetime, timedelta, timezone
 
@@ -216,7 +217,7 @@ def scenario_apply_cycle(client, page_id: str, created: list, res: Results) -> N
     hub.flush(client)
     current = _own_row(client, cfg_ds)
     res.check(config is not None and len(config["databases"]) == 1, "a broken edit keeps the last good config running")
-    res.check("Apply failed, still running" in hub._get_prop_text(current, "Warnings") and hub._get_prop_text(current, "Errors") == "",
+    res.check("Apply failed: still running" in hub._get_prop_text(current, "Warnings") and hub._get_prop_text(current, "Errors") == "",
               "the broken edit shows as a Warning and Errors stays empty")
 
     _set_text_block(client, code_id, _tasks_toml(tasks_ds))
@@ -234,24 +235,60 @@ def scenario_apply_cycle(client, page_id: str, created: list, res: Results) -> N
     res.check("not Active" in hub._get_prop_text(_own_row(client, cfg_ds), hub._REPORT_PROP), "the Report says the row is not Active")
 
 
+def scenario_deleted_row(client, page_id: str, created: list, res: Results) -> None:
+    """The Automator's row is trashed: the next read restores it, Active, from the stored copy of the applied config."""
+    cfg_ds = create_config_source(client, page_id, "Sandbox Config (deleted row)", created)
+    tasks_ds = create_tasks_source(client, page_id, created)
+    row = client.create_page(cfg_ds, {
+        "Name": {"title": [{"text": {"content": hub._EXAMPLE_ROW_NAME}}]},
+        "Status": {"status": {"name": "Active"}},
+        **_version(0),
+    })
+    created.append(("page", row["id"]))
+    client.append_blocks(row["id"], [_code_block(_tasks_toml(tasks_ds))])
+    hub.init(client, cfg_ds, daemon_version="sandbox", settle_seconds=0)
+    hub.read_config(client)
+    res.check(hub._read_stored_config() == _tasks_toml(tasks_ds), "a clean apply stores the row's TOML verbatim in the stored config file")
+
+    client.archive_page(row["id"])
+    config = None
+    for _ in range(5):  # a query right after a create may lag behind
+        config = hub.read_config(client)
+        if config is not None:
+            break
+        time.sleep(2)
+    new_id = hub._config_row_ids[0]
+    created.append(("page", new_id))
+    res.check(not hub._same_id(new_id, row["id"]), "a trashed row is recreated")
+    res.check(config is not None and [hub._normalize_uuid(d["data_source_id"]) for d in config["databases"]] == [hub._normalize_uuid(tasks_ds)],
+              "the restored row is Active and its config is applied")
+    hub.flush(client)
+    restored = client.get_page(new_id)
+    res.check(hub._row_status(restored) == "Active", "the restored row has Status Active")
+    res.check("restored from the backup" in hub._get_prop_text(restored, "Warnings"), "the restored row's Warnings says it was restored")
+    res.check(hub._read_row_toml(client, new_id)[0] == _tasks_toml(tasks_ds), "the restored row's code block holds the stored TOML")
+
+
 def run(client, page_id: str) -> int:
     """Run every scenario, always clean up, return the number of failed checks."""
     created: list[tuple[str, str]] = []
     res = Results()
-    saved_path = hub.HUB_CONFIG_PATH
+    saved_paths = hub.HUB_CONFIG_PATH, hub.STORED_CONFIG_PATH
     with tempfile.TemporaryDirectory() as tmp:
-        hub.HUB_CONFIG_PATH = os.path.join(tmp, "config_hub_state.toml")  # never touch the real state file
+        # Never touch the real state file or the real stored config copy.
+        hub.HUB_CONFIG_PATH = os.path.join(tmp, "config_hub_state.toml")
+        hub.STORED_CONFIG_PATH = os.path.join(tmp, "config_automations.toml")
         try:
             warning = callout_warning(client, page_id)
             if warning:
                 print(f"WARNING  {warning}")
-            for scenario in (scenario_example_row, scenario_apply_cycle):
+            for scenario in (scenario_example_row, scenario_apply_cycle, scenario_deleted_row):
                 try:
                     scenario(client, page_id, created, res)
                 except Exception as e:
                     res.check(False, f"{scenario.__name__} stopped with an error: {type(e).__name__}: {e}")
         finally:
-            hub.HUB_CONFIG_PATH = saved_path
+            hub.HUB_CONFIG_PATH, hub.STORED_CONFIG_PATH = saved_paths
             failures = cleanup(client, created)
     print(f"Cleanup: {len(created) - len(failures)} of {len(created)} created objects trashed.")
     for line in failures:
